@@ -1,0 +1,134 @@
+{
+    "format": "LabelForge",
+    "version": 1,
+    "title": "Наклейки 30×20 на этикетке 100×70",
+    "label": {
+        "width": 30,
+        "height": 20,
+        "radius": 1,
+        "background": "#ffffffff"
+    },
+    "objects": [
+        {
+            "type": "rect",
+            "x": 0,
+            "y": 0,
+            "w": 30,
+            "h": 20,
+            "stroke": "#ff000000",
+            "strokeWidth": 0.15,
+            "fill": "#00000000",
+            "radius": 1
+        },
+        {
+            "type": "text",
+            "x": 1.2,
+            "y": 0.8,
+            "w": 27.6,
+            "h": 6.2,
+            "text": "{Наименование}",
+            "font": "Arial",
+            "size": 7,
+            "bold": true,
+            "italic": false,
+            "underline": false,
+            "color": "#ff000000",
+            "fill": "#00000000",
+            "hAlign": 1,
+            "vAlign": 1,
+            "wrap": true,
+            "autoShrink": true,
+            "lineSpacing": 1
+        },
+        {
+            "type": "barcode",
+            "x": 2,
+            "y": 7.4,
+            "w": 26,
+            "h": 11.8,
+            "symbology": "code128",
+            "data": "{Код}",
+            "showText": true,
+            "font": "Arial",
+            "textSize": 6,
+            "color": "#ff000000",
+            "quietZone": true,
+            "qrEcc": 1,
+            "code39Check": false
+        }
+    ],
+    "data": {
+        "kind": "inline",
+        "delimiter": "auto",
+        "encoding": "auto",
+        "hasHeader": true,
+        "table": {
+            "columns": [
+                "Наименование",
+                "Код"
+            ],
+            "rows": [
+                [
+                    "Резистор 10 кОм",
+                    "R-0010K"
+                ],
+                [
+                    "Резистор 1 кОм",
+                    "R-0001K"
+                ],
+                [
+                    "Конденсатор 100 нФ",
+                    "C-0100N"
+                ],
+                [
+                    "Конденсатор 10 мкФ",
+                    "C-0010U"
+                ],
+                [
+                    "Диод 1N4148",
+                    "D-1N4148"
+                ],
+                [
+                    "Светодиод красный",
+                    "LED-RED"
+                ],
+                [
+                    "Транзистор BC547",
+                    "Q-BC547"
+                ],
+                [
+                    "Стабилизатор 7805",
+                    "U-7805"
+                ],
+                [
+                    "Кварц 16 МГц",
+                    "Y-16M"
+                ],
+                [
+                    "Разъём PBS 1×9",
+                    "J-PBS09"
+                ]
+            ]
+        }
+    },
+    "print": {
+        "layout": "roll-100x70-auto",
+        "startPosition": 1,
+        "copies": 1,
+        "quantityField": "",
+        "recordRange": "",
+        "printOutlines": false,
+        "offsetX": 0,
+        "offsetY": 0,
+        "printer": "",
+        "thermal": {
+            "lang": "zpl",
+            "dpi": 203,
+            "darkness": 15,
+            "speed": 4,
+            "gap": 2,
+            "tsplInvert": true,
+            "printer": ""
+        }
+    }
+}

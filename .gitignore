@@ -1,0 +1,11 @@
+build/
+build-*/
+dist/
+out/
+.vs/
+.vscode/
+*.user
+CMakeLists.txt.user*
+CMakeUserPresets.json
+selftest-out/
+uitest-out/
