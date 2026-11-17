@@ -15,6 +15,7 @@
 #include "SaveTemplateDialog.h"
 #include "SheetLayoutDialog.h"
 #include "barcode/Barcode.h"
+#include "core/ShapePaths.h"
 #include "data/DataLoader.h"
 #include "print/PrintJob.h"
 #include "templates/TemplateLibrary.h"
@@ -41,7 +42,9 @@
 #include <QSettings>
 #include <QStatusBar>
 #include <QTimer>
+#include <QMenu>
 #include <QToolBar>
+#include <QToolButton>
 #include <QUndoStack>
 #include <QVBoxLayout>
 
@@ -185,6 +188,30 @@ void MainWindow::createActions()
         m_view->addAction(a);  // single-letter shortcuts only while the canvas has focus
         connect(a, &QAction::triggered, this, [this, t] { m_scene->setTool(LabelScene::Tool(t.tool)); });
     }
+    // shapes: one tool with a menu of kinds; the button remembers the last kind
+    auto* shapeAct = new QAction(icons::shape(m_shapeKind), tr("Фигура"), this);
+    shapeAct->setCheckable(true);
+    shapeAct->setShortcut(QKeySequence(QStringLiteral("S")));
+    shapeAct->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+    shapeAct->setToolTip(tr("Фигура: %1 (S). Стрелка рядом — выбор фигуры").arg(shapes::kindName(m_shapeKind)));
+    shapeAct->setData(LabelScene::ToolShape);
+    m_toolGroup->addAction(shapeAct);
+    m_toolActions.insert(LabelScene::ToolShape, shapeAct);
+    m_view->addAction(shapeAct);
+    connect(shapeAct, &QAction::triggered, this, [this] { m_scene->setTool(LabelScene::ToolShape); });
+    auto* shapeMenu = new QMenu(tr("Фигуры"), this);
+    for (int k = 0; k < shapes::KindCount; ++k) {
+        QAction* ka = shapeMenu->addAction(icons::shape(k), shapes::kindName(k));
+        ka->setObjectName(QStringLiteral("shape-") + shapes::kindId(k));
+        connect(ka, &QAction::triggered, this, [this, shapeAct, k] {
+            m_shapeKind = k;
+            shapeAct->setIcon(icons::shape(k));
+            shapeAct->setToolTip(tr("Фигура: %1 (S). Стрелка рядом — выбор фигуры").arg(shapes::kindName(k)));
+            shapeAct->setChecked(true);
+            m_scene->setTool(LabelScene::ToolShape);
+        });
+    }
+    shapeAct->setMenu(shapeMenu);
     m_toolActions.value(LabelScene::ToolSelect)->setChecked(true);
 
     auto alignAct = [&](const QString& id, const QString& text, int mode) {
@@ -356,6 +383,8 @@ void MainWindow::createToolbars()
     addToolBar(Qt::LeftToolBarArea, tools);
     for (QAction* a : m_toolGroup->actions())
         tools->addAction(a);
+    if (auto* b = qobject_cast<QToolButton*>(tools->widgetForAction(m_toolActions.value(LabelScene::ToolShape))))
+        b->setPopupMode(QToolButton::MenuButtonPopup);
     m_viewMenu->addAction(main->toggleViewAction());
     m_viewMenu->addAction(arrange->toggleViewAction());
     m_viewMenu->addAction(tools->toggleViewAction());
@@ -792,6 +821,18 @@ void MainWindow::insertObject(int tool, const QPointF& posIn)
         r->w = std::min(20.0, maxW);
         r->h = 12;
         obj = std::move(r);
+        break;
+    }
+    case LabelScene::ToolShape: {
+        auto s = std::make_unique<PolyShapeObject>();
+        s->setKind(m_shapeKind);
+        const bool wide = m_shapeKind == shapes::Arrow || m_shapeKind == shapes::DoubleArrow ||
+                          m_shapeKind == shapes::Chevron || m_shapeKind == shapes::Banner ||
+                          m_shapeKind == shapes::Callout || m_shapeKind == shapes::Parallelogram ||
+                          m_shapeKind == shapes::Trapezoid;
+        s->w = std::min(wide ? 24.0 : 16.0, maxW);
+        s->h = wide ? 12 : s->w;
+        obj = std::move(s);
         break;
     }
     case LabelScene::ToolEllipse: {

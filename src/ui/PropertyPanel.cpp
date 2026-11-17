@@ -190,14 +190,14 @@ void PropertyPanel::build()
             buildText(form, t);
         else if (auto* b = dynamic_cast<BarcodeObject*>(o))
             buildBarcode(form, b);
-        else if (auto* r = dynamic_cast<RectObject*>(o))
-            buildShape(form, r, true);
-        else if (auto* e = dynamic_cast<EllipseObject*>(o))
-            buildShape(form, e, false);
+        else if (auto* sh = dynamic_cast<ShapeObject*>(o))
+            buildShape(form, sh);
         else if (auto* ln = dynamic_cast<LineObject*>(o))
             buildLine(form, ln);
         else if (auto* im = dynamic_cast<ImageObject*>(o))
             buildImage(form, im);
+        if (o->supportsShadow())
+            buildShadow(form, o);
         buildCommon(form, o);
     }
     outer->addStretch(1);
@@ -419,28 +419,186 @@ void PropertyPanel::buildText(QFormLayout* f, TextObject* t)
     f->addRow(shrink);
 }
 
-void PropertyPanel::buildShape(QFormLayout* f, ShapeObject* s, bool isRect)
+namespace {
+QStringList penStyleNames()
 {
-    f->addRow(tr("Контур:"), new ColorButton(s->stroke, true, [this, s](const QColor& c) {
-                  s->stroke = c;
-                  edited(s, QStringLiteral("stroke"));
-              }));
+    return {QObject::tr("Сплошная"), QObject::tr("Штриховая"), QObject::tr("Пунктирная"), QObject::tr("Штрих-пунктир"),
+            QObject::tr("Штрих-две точки")};
+}
+} // namespace
+
+void PropertyPanel::buildShape(QFormLayout* f, ShapeObject* s)
+{
+    // combos that show or hide other rows rebuild the panel
+    auto combo = [this, f](const QString& label, const QStringList& items, int current, std::function<void(int)> set,
+                           bool rebuild) {
+        auto* c = new QComboBox;
+        c->addItems(items);
+        c->setCurrentIndex(current);
+        connect(c, &QComboBox::currentIndexChanged, this, [this, set, rebuild](int i) {
+            if (m_loading)
+                return;
+            set(i);
+            if (rebuild)
+                rebuildLater();
+        });
+        f->addRow(label, c);
+        return c;
+    };
+    auto color = [this, f, s](const QString& label, QColor* target, bool allowNone, const QString& key) {
+        f->addRow(label, new ColorButton(*target, allowNone, [this, s, target, key](const QColor& c) {
+                      *target = c;
+                      edited(s, key);
+                  }));
+    };
+
+    if (auto* ps = dynamic_cast<PolyShapeObject*>(s)) {
+        f->addRow(section(tr("Фигура")));
+        QStringList kinds;
+        for (int k = 0; k < shapes::KindCount; ++k)
+            kinds << shapes::kindName(k);
+        auto* kind = combo(tr("Вид:"), kinds, ps->kind, [this, ps](int k) {
+            ps->setKind(k);
+            edited(ps, QStringLiteral("kind"));
+        }, true);
+        for (int k = 0; k < shapes::KindCount; ++k)
+            kind->setItemIcon(k, icons::shape(k));
+        for (int param = 1; param <= 2; ++param) {
+            const QString label = param == 1 ? shapes::param1Label(ps->kind) : shapes::param2Label(ps->kind);
+            if (label.isEmpty())
+                continue;
+            double mn, mx, def;
+            int dec;
+            shapes::paramRange(ps->kind, param, &mn, &mx, &def, &dec);
+            const bool count = param == 1 && (ps->kind == shapes::Polygon || ps->kind == shapes::Star);
+            double* field = param == 1 ? &ps->param1 : &ps->param2;
+            f->addRow(label, spin(mn, mx, dec, count ? 1 : 5, count ? QString() : QStringLiteral(" %"),
+                                  [field] { return *field; }, [this, ps, field, param](double v) {
+                                      *field = v;
+                                      edited(ps, QStringLiteral("param%1").arg(param));
+                                  }));
+        }
+    }
+
+    f->addRow(section(tr("Контур")));
+    color(tr("Цвет:"), &s->stroke, true, QStringLiteral("stroke"));
     f->addRow(tr("Толщина:"), spin(0, 20, 2, 0.1, tr(" мм"), [s] { return s->strokeWidth; }, [this, s](double v) {
                   s->strokeWidth = v;
                   edited(s, QStringLiteral("strokeWidth"));
               }));
-    f->addRow(tr("Заливка:"), new ColorButton(s->fill, true, [this, s](const QColor& c) {
-                  s->fill = c;
-                  s->fillType = c.alpha() > 0 ? shapes::FillSolid : shapes::FillNone;
-                  edited(s, QStringLiteral("fill"));
-              }));
-    if (isRect) {
-        auto* r = static_cast<RectObject*>(s);
+    combo(tr("Рамка:"), {tr("Одинарная"), tr("Двойная"), tr("Толстая + тонкая")}, s->frame, [this, s](int i) {
+        s->frame = i;
+        edited(s, QStringLiteral("frame"));
+    }, true);
+    if (s->frame == shapes::FrameSingle) {
+        combo(tr("Тип линии:"), penStyleNames(), std::clamp(s->strokeStyle, 1, 5) - 1, [this, s](int i) {
+            s->strokeStyle = i + 1;
+            edited(s, QStringLiteral("strokeStyle"));
+        }, false);
+    } else {
+        f->addRow(tr("Зазор:"), spin(0.05, 20, 2, 0.1, tr(" мм"), [s] { return s->frameGap; }, [this, s](double v) {
+                      s->frameGap = v;
+                      edited(s, QStringLiteral("frameGap"));
+                  }));
+    }
+    if (auto* r = dynamic_cast<RectObject*>(s)) {
         f->addRow(tr("Скругление:"), spin(0, 200, 2, 0.5, tr(" мм"), [r] { return r->radius; }, [this, r](double v) {
                       r->radius = v;
                       edited(r, QStringLiteral("radius"));
                   }));
     }
+
+    f->addRow(section(tr("Заливка")));
+    combo(tr("Заливка:"), {tr("Нет"), tr("Сплошная"), tr("Линейный градиент"), tr("Радиальный градиент"), tr("Узор")},
+          s->fillType, [this, s](int i) {
+              s->fillType = i;
+              // a freshly chosen fill should be visible
+              if (s->fill.alpha() == 0)
+                  s->fill = i == shapes::FillSolid ? QColor(200, 200, 200) : QColor(Qt::black);
+              edited(s, QStringLiteral("fillType"));
+          }, true);
+    switch (s->fillType) {
+    case shapes::FillSolid: color(tr("Цвет:"), &s->fill, false, QStringLiteral("fill")); break;
+    case shapes::FillLinear:
+        color(tr("Цвет 1:"), &s->fill, true, QStringLiteral("fill"));
+        color(tr("Цвет 2:"), &s->fill2, true, QStringLiteral("fill2"));
+        f->addRow(tr("Угол:"), spin(-360, 360, 0, 15, QStringLiteral("°"), [s] { return s->gradientAngle; },
+                                    [this, s](double v) {
+                                        s->gradientAngle = v;
+                                        edited(s, QStringLiteral("gradientAngle"));
+                                    }));
+        break;
+    case shapes::FillRadial:
+        color(tr("В центре:"), &s->fill, true, QStringLiteral("fill"));
+        color(tr("По краям:"), &s->fill2, true, QStringLiteral("fill2"));
+        break;
+    case shapes::FillPattern: {
+        QStringList names;
+        for (int i = 0; i < shapes::PatternCount; ++i)
+            names << shapes::patternName(i);
+        combo(tr("Узор:"), names, s->pattern, [this, s](int i) {
+            s->pattern = i;
+            edited(s, QStringLiteral("pattern"));
+        }, false);
+        color(tr("Цвет узора:"), &s->fill, false, QStringLiteral("fill"));
+        color(tr("Фон:"), &s->fill2, true, QStringLiteral("fill2"));
+        f->addRow(tr("Шаг:"), spin(0.2, 50, 2, 0.1, tr(" мм"), [s] { return s->patternSpacing; }, [this, s](double v) {
+                      s->patternSpacing = v;
+                      edited(s, QStringLiteral("patternSpacing"));
+                  }));
+        f->addRow(tr("Толщина узора:"), spin(0.05, 20, 2, 0.05, tr(" мм"), [s] { return s->patternWidth; },
+                                            [this, s](double v) {
+                                                s->patternWidth = v;
+                                                edited(s, QStringLiteral("patternWidth"));
+                                            }));
+        break;
+    }
+    default: break;
+    }
+    if (s->fillType == shapes::FillLinear || s->fillType == shapes::FillRadial) {
+        auto* hint = new QLabel(tr("На термопринтере градиент печатается точечным узором."));
+        hint->setWordWrap(true);
+        f->addRow(hint);
+    }
+}
+
+void PropertyPanel::buildShadow(QFormLayout* f, LabelObject* o)
+{
+    f->addRow(section(tr("Тень")));
+    auto* on = new QCheckBox(tr("Отбрасывать тень"));
+    on->setChecked(o->shadow);
+    connect(on, &QCheckBox::toggled, this, [this, o](bool v) {
+        o->shadow = v;
+        edited(o, QStringLiteral("shadow"));
+        rebuildLater();
+    });
+    f->addRow(on);
+    if (!o->shadow)
+        return;
+    f->addRow(tr("Сдвиг X:"), spin(-50, 50, 2, 0.1, tr(" мм"), [o] { return o->shadowDx; }, [this, o](double v) {
+                  o->shadowDx = v;
+                  edited(o, QStringLiteral("shadowDx"));
+              }));
+    f->addRow(tr("Сдвиг Y:"), spin(-50, 50, 2, 0.1, tr(" мм"), [o] { return o->shadowDy; }, [this, o](double v) {
+                  o->shadowDy = v;
+                  edited(o, QStringLiteral("shadowDy"));
+              }));
+    f->addRow(tr("Цвет тени:"), new ColorButton(o->shadowColor, false, [this, o](const QColor& c) {
+                  o->shadowColor = c;
+                  edited(o, QStringLiteral("shadowColor"));
+              }));
+    f->addRow(tr("Непрозрачность:"), spin(0, 100, 0, 5, QStringLiteral(" %"), [o] { return o->shadowOpacity * 100; },
+                                          [this, o](double v) {
+                                              o->shadowOpacity = v / 100;
+                                              edited(o, QStringLiteral("shadowOpacity"));
+                                          }));
+    auto* blur = spin(0, 20, 2, 0.2, tr(" мм"), [o] { return o->shadowBlur; }, [this, o](double v) {
+        o->shadowBlur = v;
+        edited(o, QStringLiteral("shadowBlur"));
+    });
+    blur->setToolTip(tr("0 — резкая тень, остаётся векторной в PDF.\n"
+                        "Размытая тень переводится в растр, на термопринтере — точечным узором."));
+    f->addRow(tr("Размытие:"), blur);
 }
 
 void PropertyPanel::buildLine(QFormLayout* f, LineObject* l)
@@ -454,13 +612,37 @@ void PropertyPanel::buildLine(QFormLayout* f, LineObject* l)
                   edited(l, QStringLiteral("lineWidth"));
               }));
     auto* style = new QComboBox;
-    style->addItems({tr("Сплошная"), tr("Штриховая"), tr("Пунктирная"), tr("Штрих-пунктир"), tr("Штрих-две точки")});
+    style->addItems(penStyleNames());
     style->setCurrentIndex(qBound(1, l->penStyle, 5) - 1);
     connect(style, &QComboBox::currentIndexChanged, this, [this, l](int i) {
         l->penStyle = i + 1;
         edited(l, QStringLiteral("penStyle"));
     });
     f->addRow(tr("Тип:"), style);
+    const QStringList caps{tr("Нет"), tr("Стрелка"), tr("Треугольник"), tr("Точка"), tr("Черта")};
+    auto capCombo = [this, f, l, caps](const QString& label, int* field, const QString& key) {
+        auto* c = new QComboBox;
+        c->addItems(caps);
+        c->setCurrentIndex(std::clamp(*field, 0, 4));
+        connect(c, &QComboBox::currentIndexChanged, this, [this, l, field, key](int i) {
+            if (m_loading)
+                return;
+            *field = i;
+            edited(l, key);
+            rebuildLater();
+        });
+        f->addRow(label, c);
+    };
+    capCombo(tr("Начало:"), &l->startCap, QStringLiteral("startCap"));
+    capCombo(tr("Конец:"), &l->endCap, QStringLiteral("endCap"));
+    if (l->startCap != LineObject::CapNone || l->endCap != LineObject::CapNone) {
+        auto* size = spin(1, 20, 1, 0.5, tr(" × толщина"), [l] { return l->capSize; }, [this, l](double v) {
+            l->capSize = v;
+            edited(l, QStringLiteral("capSize"));
+        });
+        size->setToolTip(tr("Длина наконечника в толщинах линии"));
+        f->addRow(tr("Наконечник:"), size);
+    }
     auto* hint = new QLabel(tr("Для вертикальной или наклонной линии задайте поворот."));
     hint->setWordWrap(true);
     f->addRow(hint);

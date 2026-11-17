@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "Icons.h"
 
+#include "core/ShapePaths.h"
+
 #include <QHash>
 #include <QPainter>
 #include <QPainterPath>
@@ -307,6 +309,36 @@ QIcon colorSwatch(const QColor& c)
     p.drawRect(pm.rect().adjusted(0, 0, -1, -1));
     p.end();
     return QIcon(pm);
+}
+
+QIcon shape(int kind)
+{
+    // wide kinds get a wide box so they read as arrows and ribbons
+    const bool wide = kind == shapes::Arrow || kind == shapes::DoubleArrow || kind == shapes::Chevron ||
+                      kind == shapes::Banner || kind == shapes::Callout || kind == shapes::Parallelogram ||
+                      kind == shapes::Trapezoid;
+    const double w = wide ? 26 : 22, h = wide ? 17 : 22;
+    double mn, mx, d1, d2;
+    int dec;
+    shapes::paramRange(kind, 1, &mn, &mx, &d1, &dec);
+    shapes::paramRange(kind, 2, &mn, &mx, &d2, &dec);
+    QIcon icon;
+    for (int s : {16, 24, 32, 48}) {
+        QPixmap pm(s, s);
+        pm.fill(Qt::transparent);
+        QPainter p(&pm);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.scale(s / 32.0, s / 32.0);
+        p.translate((32 - w) / 2, (32 - h) / 2);
+        QPen pen(INK, 1.6);
+        pen.setJoinStyle(Qt::RoundJoin);
+        p.setPen(pen);
+        p.setBrush(QColor(ACCENT.red(), ACCENT.green(), ACCENT.blue(), 90));
+        p.drawPath(shapes::shapePath(kind, w, h, d1, d2));
+        p.end();
+        icon.addPixmap(pm);
+    }
+    return icon;
 }
 
 } // namespace lf::icons

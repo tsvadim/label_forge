@@ -11,5 +11,6 @@ namespace lf::icons {
 QIcon get(const QString& name);
 QIcon appIcon();
 QIcon colorSwatch(const QColor& c);
+QIcon shape(int kind);  // shapes::Kind, drawn from the same outline as the object
 
 } // namespace lf::icons

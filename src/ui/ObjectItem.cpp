@@ -50,7 +50,7 @@ double ObjectItem::handleSize() const
 QRectF ObjectItem::boundingRect() const
 {
     const double hs = handleSize();
-    const double m = std::max(hs * 5, 0.5 * std::max(m_obj->w, m_obj->h) + 2);
+    const double m = std::max(hs * 5, 0.5 * std::max(m_obj->w, m_obj->h) + 2) + m_obj->shadowReach();
     return QRectF(0, 0, m_obj->w, m_obj->h).adjusted(-m, -m, m, m);
 }
 
@@ -108,7 +108,7 @@ void ObjectItem::paint(QPainter* p, const QStyleOptionGraphicsItem*, QWidget*)
     p->save();
     p->setRenderHint(QPainter::Antialiasing, true);
     p->setRenderHint(QPainter::SmoothPixmapTransform, true);
-    m_obj->paint(p, sc->context());
+    m_obj->draw(p, sc->context());
     p->restore();
 
     const QRectF box(0, 0, m_obj->w, m_obj->h);

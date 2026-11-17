@@ -37,7 +37,8 @@ private:
     void buildLabel(QFormLayout* f);
     void buildCommon(QFormLayout* f, LabelObject* o);
     void buildText(QFormLayout* f, class TextObject* t);
-    void buildShape(QFormLayout* f, class ShapeObject* s, bool rect);
+    void buildShape(QFormLayout* f, class ShapeObject* s);
+    void buildShadow(QFormLayout* f, LabelObject* o);
     void buildLine(QFormLayout* f, class LineObject* l);
     void buildImage(QFormLayout* f, ImageObject* im);
     void buildBarcode(QFormLayout* f, class BarcodeObject* b);

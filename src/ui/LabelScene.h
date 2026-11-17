@@ -15,7 +15,7 @@ class ObjectItem;
 class LabelScene : public QGraphicsScene {
     Q_OBJECT
 public:
-    enum Tool { ToolSelect, ToolText, ToolRect, ToolEllipse, ToolLine, ToolImage, ToolBarcode, ToolQr };
+    enum Tool { ToolSelect, ToolText, ToolRect, ToolEllipse, ToolLine, ToolImage, ToolBarcode, ToolQr, ToolShape };
 
     explicit LabelScene(QObject* parent = nullptr);
 

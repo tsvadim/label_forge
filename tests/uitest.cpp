@@ -2,6 +2,7 @@
 // UI smoke test: drives the main window and dialogs offscreen and saves screenshots.
 // Usage: QT_QPA_PLATFORM=offscreen labelforge_uitest <output-dir>
 #include "core/LabelDocument.h"
+#include "core/ShapePaths.h"
 #include "data/DataLoader.h"
 #include "templates/TemplateLibrary.h"
 #include "ui/ClipartPanel.h"
@@ -309,6 +310,44 @@ int main(int argc, char** argv)
         undo->undo();
         clip->setFilter(QString());
         settle();
+    }
+
+    // shape tool: pick a kind from the menu, click on the label, edit the effects
+    {
+        const int n = int(scene->document()->objects.size());
+        auto* arrow = w.findChild<QAction*>(QStringLiteral("shape-arrow"));
+        CHECK(arrow != nullptr, "shapes menu has the arrow");
+        if (arrow)
+            arrow->trigger();
+        CHECK(scene->tool() == LabelScene::ToolShape, "shape kind selects the shape tool");
+        const QPoint at = view->mapFromScene(QPointF(4, 24));
+        mouse(vp, QEvent::MouseButtonPress, at, Qt::LeftButton);
+        mouse(vp, QEvent::MouseButtonRelease, at, Qt::NoButton);
+        settle();
+        CHECK(int(scene->document()->objects.size()) == n + 1, "shape tool inserts an object");
+        auto* sh = dynamic_cast<PolyShapeObject*>(scene->document()->objects.back().get());
+        CHECK(sh && sh->kind == shapes::Arrow && sh->w > sh->h, "inserted shape is a wide arrow");
+        if (sh) {
+            sh->fillType = shapes::FillLinear;
+            sh->fill = QColor(30, 90, 200);
+            sh->fill2 = QColor(255, 230, 120);
+            sh->frame = shapes::FrameDouble;
+            sh->strokeWidth = 0.5;
+            sh->shadow = true;
+            sh->shadowBlur = 0.8;
+            scene->rebuild();
+            scene->clearSelection();
+            scene->selectObjects({sh});
+            settle();
+            shot(&w, out, QStringLiteral("09_shape"));
+            auto* panel = w.findChild<PropertyPanel*>();
+            shot(panel, out, QStringLiteral("10_shape_props"));
+            panel->verticalScrollBar()->setValue(panel->verticalScrollBar()->maximum() / 2);
+            shot(panel, out, QStringLiteral("11_shape_props_middle"));
+        }
+        undo->undo();
+        settle();
+        CHECK(int(scene->document()->objects.size()) == n, "undo removes the shape");
     }
 
     // dialogs

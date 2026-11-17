@@ -125,6 +125,7 @@ private:
     QLabel* m_statusInfo = nullptr;
     bool m_syncingSelection = false;
     int m_pasteCount = 0;
+    int m_shapeKind = 1;  // shapes::Star, kind the shape tool inserts
 };
 
 } // namespace lf
