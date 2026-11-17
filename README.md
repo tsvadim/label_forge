@@ -76,7 +76,7 @@ windeployqt --release --compiler-runtime build\LabelForge.exe
 
 Установщик: после `build-windows.bat` выполните `iscc packaging\windows\labelforge.iss` (Inno Setup 6) — получится `dist\LabelForge-1.0.0-setup.exe` с ярлыками и ассоциацией файлов `.lfl`.
 
-**GitHub Actions**: workflow `.github/workflows/build.yml` собирает Windows-версию (zip + установщик) на каждый push и прикрепляет её к релизу при теге `v*`; заодно прогоняет тесты на Linux.
+**GitHub Actions**: workflow `.github/workflows/build.yml` собирает Windows-версию (zip + установщик) на каждый push и прикрепляет её к релизу при теге `v*`; заодно прогоняет тесты на Linux. Номер версии берётся из тега: `git tag v1.2.0 && git push origin v1.2.0` выпустит релиз 1.2.0 — с этим номером в «О программе», свойствах exe и имени установщика. Без тега используется версия из `CMakeLists.txt`; локально её можно задать параметром `-DLABELFORGE_VERSION=1.2.0`.
 
 Linux: `sudo apt install qt6-base-dev qt6-svg-dev cmake g++`, затем `cmake -S . -B build && cmake --build build`.
 

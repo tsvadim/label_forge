@@ -7,6 +7,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# the Release step attaches files to a GitHub release
+permissions:
+  contents: write
+
 jobs:
   windows:
     name: Windows x64 (MSVC, Qt 6)
@@ -24,8 +28,21 @@ jobs:
       - name: MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
 
+      - name: Version
+        shell: pwsh
+        run: |
+          # tag v1.2.0 -> 1.2.0; other builds keep the version from CMakeLists.txt
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $v = $env:GITHUB_REF_NAME.Substring(1)
+          } else {
+            $v = (Select-String -Path CMakeLists.txt -Pattern '^\s*VERSION\s+(\S+)' | Select-Object -First 1).Matches[0].Groups[1].Value
+          }
+          "Version: $v"
+          "LF_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        shell: pwsh
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release "-DLABELFORGE_VERSION=$env:LF_VERSION"
 
       - name: Build
         run: cmake --build build --parallel
@@ -52,7 +69,7 @@ jobs:
         run: |
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
-          & $iscc packaging/windows/labelforge.iss
+          & $iscc "/DAppVersion=$env:LF_VERSION" packaging/windows/labelforge.iss
 
       - uses: actions/upload-artifact@v4
         with:

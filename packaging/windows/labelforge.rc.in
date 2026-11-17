@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Configured by CMake into the build directory (version from LABELFORGE_VERSION).
 #include <winver.h>
 
-IDI_ICON1 ICON "labelforge.ico"
+IDI_ICON1 ICON "@LF_RC_ICON@"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,0,0,0
- PRODUCTVERSION 1,0,0,0
+ FILEVERSION @LF_VER_MAJOR@,@LF_VER_MINOR@,@LF_VER_PATCH@,0
+ PRODUCTVERSION @LF_VER_MAJOR@,@LF_VER_MINOR@,@LF_VER_PATCH@,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS VOS_NT_WINDOWS32
@@ -18,12 +19,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "LabelForge contributors"
             VALUE "FileDescription", "LabelForge label designer"
-            VALUE "FileVersion", "1.0.0"
+            VALUE "FileVersion", "@LABELFORGE_VERSION@"
             VALUE "InternalName", "LabelForge"
             VALUE "LegalCopyright", "GNU GPL v3 or later"
             VALUE "OriginalFilename", "LabelForge.exe"
             VALUE "ProductName", "LabelForge"
-            VALUE "ProductVersion", "1.0.0"
+            VALUE "ProductVersion", "@LABELFORGE_VERSION@"
         END
     END
     BLOCK "VarFileInfo"

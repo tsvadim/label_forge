@@ -3,7 +3,10 @@
 ; SPDX-License-Identifier: GPL-3.0-or-later
 
 #define AppName "LabelForge"
-#define AppVersion "1.0.0"
+; CI passes the version from the git tag: iscc /DAppVersion=1.2.0 ...
+#ifndef AppVersion
+  #define AppVersion "1.0.0"
+#endif
 #define AppExe "LabelForge.exe"
 
 [Setup]
