@@ -168,10 +168,29 @@ QVariant ObjectItem::itemChange(GraphicsItemChange change, const QVariant& value
     return QGraphicsItem::itemChange(change, value);
 }
 
+ObjectItem* ObjectItem::otherHandleOwnerAt(const QPointF& scenePos) const
+{
+    if (!scene())
+        return nullptr;
+    for (QGraphicsItem* gi : scene()->selectedItems()) {
+        if (gi == this || gi->type() != Type)
+            continue;
+        auto* other = static_cast<ObjectItem*>(gi);
+        if (other->handleAt(other->mapFromScene(scenePos)) >= 0)
+            return other;
+    }
+    return nullptr;
+}
+
 void ObjectItem::mousePressEvent(QGraphicsSceneMouseEvent* e)
 {
     if (e->button() == Qt::LeftButton) {
         const int h = handleAt(e->pos());
+        if (h < 0 && otherHandleOwnerAt(e->scenePos())) {
+            // let the press fall through to the selected item underneath
+            e->ignore();
+            return;
+        }
         if (h >= 0) {
             m_drag = h;
             m_changed = false;
@@ -278,6 +297,19 @@ void ObjectItem::mouseReleaseEvent(QGraphicsSceneMouseEvent* e)
 void ObjectItem::hoverMoveEvent(QGraphicsSceneHoverEvent* e)
 {
     const int h = handleAt(e->pos());
+    ObjectItem* other = h < 0 ? otherHandleOwnerAt(e->scenePos()) : nullptr;
+    if (other) {
+        // show the cursor of the handle the press will go to
+        other->setHandleCursor(other->handleAt(other->mapFromScene(e->scenePos())));
+        setCursor(other->cursor());
+    } else {
+        setHandleCursor(h);
+    }
+    QGraphicsItem::hoverMoveEvent(e);
+}
+
+void ObjectItem::setHandleCursor(int h)
+{
     static const Qt::CursorShape shapes[] = {Qt::SizeFDiagCursor, Qt::SizeVerCursor, Qt::SizeBDiagCursor,
                                              Qt::SizeHorCursor,   Qt::SizeFDiagCursor, Qt::SizeVerCursor,
                                              Qt::SizeBDiagCursor, Qt::SizeHorCursor};
@@ -294,7 +326,6 @@ void ObjectItem::hoverMoveEvent(QGraphicsSceneHoverEvent* e)
     } else {
         unsetCursor();
     }
-    QGraphicsItem::hoverMoveEvent(e);
 }
 
 void ObjectItem::hoverLeaveEvent(QGraphicsSceneHoverEvent* e)

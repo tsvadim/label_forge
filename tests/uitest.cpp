@@ -111,6 +111,8 @@ int main(int argc, char** argv)
     const double w0 = bcItem->object()->w;
     const QPoint start = view->mapFromScene(bcItem->mapToScene(QPointF(bcItem->object()->w, bcItem->object()->h)));
     QWidget* vp = view->viewport();
+    // the date text lies over this corner: the selected item's handle must still win
+    CHECK(scene->itemAt(view->mapToScene(start), QTransform()) != bcItem, "resize handle is under another object");
     mouse(vp, QEvent::MouseButtonPress, start, Qt::LeftButton);
     mouse(vp, QEvent::MouseMove, start + QPoint(20, 10), Qt::LeftButton);
     mouse(vp, QEvent::MouseMove, start + QPoint(40, 20), Qt::LeftButton);

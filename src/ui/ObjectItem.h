@@ -37,6 +37,10 @@ private:
     double handleSize() const;  // millimetres, constant on screen
     QPointF handlePos(int i) const;
     int handleAt(const QPointF& local) const;
+    // another selected item whose handle is at this scene point: handles win
+    // over objects lying on top of them
+    ObjectItem* otherHandleOwnerAt(const QPointF& scenePos) const;
+    void setHandleCursor(int handle);
     void applyGeometry(double w, double h, const QPointF& topLeftInStartFrame);
 
     LabelObject* m_obj;
