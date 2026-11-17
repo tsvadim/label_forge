@@ -38,6 +38,10 @@ add_library(labelforge_core STATIC
     src/core/ShapePaths.cpp
     src/core/RemoteImage.h
     src/core/RemoteImage.cpp
+    src/core/Iconify.h
+    src/core/Iconify.cpp
+    src/core/IconWords.h
+    src/core/IconWords.cpp
     src/core/LabelObject.h
     src/core/LabelObject.cpp
     src/core/DataSource.h
@@ -88,6 +92,8 @@ if(LABELFORGE_BUILD_APP)
         src/ui/DataPanel.cpp
         src/ui/ClipartPanel.h
         src/ui/ClipartPanel.cpp
+        src/ui/IconDownloadDialog.h
+        src/ui/IconDownloadDialog.cpp
         src/ui/DataSourceDialog.h
         src/ui/DataSourceDialog.cpp
         src/ui/SheetLayoutDialog.h

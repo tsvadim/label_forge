@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "ClipartPanel.h"
 
+#include "IconDownloadDialog.h"
+#include "core/IconWords.h"
+
+#include <QAbstractListModel>
+#include <QCollator>
+#include <QComboBox>
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDesktopServices>
@@ -10,41 +16,31 @@
 #include <QHash>
 #include <QImageReader>
 #include <QLineEdit>
-#include <QListWidget>
-#include <QMessageBox>
+#include <QListView>
 #include <QMimeData>
 #include <QPainter>
+#include <QPixmap>
+#include <QSet>
 #include <QStandardPaths>
 #include <QSvgRenderer>
 #include <QTabBar>
+#include <QThread>
+#include <QThreadPool>
+#include <QTimer>
 #include <QToolButton>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <algorithm>
+#include <atomic>
 
 namespace lf {
 
 namespace {
 const int THUMB = 48;
+const QSize GRID(THUMB + 40, THUMB + 40);  // room for two lines of the name
+const QString LOOSE = QStringLiteral("\x01loose");  // section item: files directly in the folder
 
-// List that drags its items out as file URLs, so the label view (and other
-// programs) see an ordinary file drop.
-class ClipartList : public QListWidget {
-public:
-    using QListWidget::QListWidget;
-
-protected:
-    QStringList mimeTypes() const override { return {QStringLiteral("text/uri-list")}; }
-    QMimeData* mimeData(const QList<QListWidgetItem*>& items) const override
-    {
-        QList<QUrl> urls;
-        for (const QListWidgetItem* it : items)
-            urls << QUrl::fromLocalFile(it->data(Qt::UserRole).toString());
-        auto* mime = new QMimeData;
-        mime->setUrls(urls);
-        return mime;
-    }
-};
+std::atomic<int> g_rendered{0};
 
 bool isSvgFile(const QString& path)
 {
@@ -52,16 +48,9 @@ bool isSvgFile(const QString& path)
     return s == QLatin1String("svg") || s == QLatin1String("svgz");
 }
 
-QIcon thumbnail(const QString& path)
+// Runs in a worker thread: only QImage, no QPixmap.
+QImage renderThumbnail(const QString& path)
 {
-    // thumbnails survive rescans; a changed file gets a new key
-    static QHash<QString, QIcon> cache;
-    const QFileInfo fi(path);
-    const QString key = path + QLatin1Char('|') + QString::number(fi.lastModified().toMSecsSinceEpoch()) +
-                        QLatin1Char('|') + QString::number(fi.size());
-    auto it = cache.constFind(key);
-    if (it != cache.constEnd())
-        return *it;
     QImage img;
     if (isSvgFile(path)) {
         QSvgRenderer r(path);
@@ -87,13 +76,124 @@ QIcon thumbnail(const QString& path)
         }
         img = reader.read();
     }
-    QIcon icon;
-    if (!img.isNull())
-        icon = QIcon(QPixmap::fromImage(img));
-    cache.insert(key, icon);
-    return icon;
+    ++g_rendered;
+    return img;
 }
 } // namespace
+
+// Rows of the visible pictures. Thumbnails are requested by the view only
+// for the rows it paints (all items have one size, so the view does not ask
+// the others) and rendered in a thread pool; until then a blank is shown.
+class ClipartModel : public QAbstractListModel {
+public:
+    struct Row {
+        QString path, name, key;
+    };
+
+    explicit ClipartModel(QObject* parent) : QAbstractListModel(parent)
+    {
+        m_pool.setMaxThreadCount(std::max(1, QThread::idealThreadCount() - 1));
+        QPixmap blank(THUMB, THUMB);
+        blank.fill(Qt::transparent);
+        m_blank = blank;
+    }
+    ~ClipartModel() override
+    {
+        m_pool.clear();
+        m_pool.waitForDone();
+    }
+
+    void setRows(QList<Row> rows)
+    {
+        // pictures that scrolled away or were filtered out need not be rendered
+        m_pool.clear();
+        m_pending.clear();
+        beginResetModel();
+        m_rows = std::move(rows);
+        m_rowOf.clear();
+        for (int i = 0; i < m_rows.size(); ++i)
+            m_rowOf.insert(m_rows.at(i).key, i);
+        endResetModel();
+    }
+
+    int rowCount(const QModelIndex& parent = QModelIndex()) const override
+    {
+        return parent.isValid() ? 0 : int(m_rows.size());
+    }
+
+    QVariant data(const QModelIndex& index, int role) const override
+    {
+        if (!index.isValid() || index.row() >= m_rows.size())
+            return QVariant();
+        const Row& r = m_rows.at(index.row());
+        switch (role) {
+        case Qt::DisplayRole: return r.name;
+        case Qt::ToolTipRole: return r.name + QLatin1Char('\n') + QDir::toNativeSeparators(r.path);
+        case Qt::UserRole: return r.path;
+        case Qt::SizeHintRole: return QSize(GRID.width() - 4, GRID.height() - 4);
+        case Qt::DecorationRole: {
+            const auto it = s_cache.constFind(r.key);
+            if (it != s_cache.constEnd())
+                return *it;
+            request(r);
+            return m_blank;
+        }
+        default: return QVariant();
+        }
+    }
+
+    Qt::ItemFlags flags(const QModelIndex& index) const override
+    {
+        return index.isValid() ? Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsDragEnabled : Qt::NoItemFlags;
+    }
+
+    // dragged out as file URLs, so the label view (and other programs) see an ordinary file drop
+    QStringList mimeTypes() const override { return {QStringLiteral("text/uri-list")}; }
+    QMimeData* mimeData(const QModelIndexList& indexes) const override
+    {
+        QList<QUrl> urls;
+        for (const QModelIndex& i : indexes)
+            urls << QUrl::fromLocalFile(data(i, Qt::UserRole).toString());
+        auto* mime = new QMimeData;
+        mime->setUrls(urls);
+        return mime;
+    }
+
+private:
+    void request(const Row& r) const
+    {
+        if (m_pending.contains(r.key))
+            return;
+        m_pending.insert(r.key);
+        auto* self = const_cast<ClipartModel*>(this);
+        const QString path = r.path, key = r.key;
+        m_pool.start([self, path, key] {
+            const QImage img = renderThumbnail(path);
+            QMetaObject::invokeMethod(self, [self, key, img] { self->ready(key, img); }, Qt::QueuedConnection);
+        });
+    }
+
+    void ready(const QString& key, const QImage& img)
+    {
+        m_pending.remove(key);
+        // thumbnails survive rescans; a changed file gets a new key
+        s_cache.insert(key, img.isNull() ? m_blank : QPixmap::fromImage(img));
+        const int row = m_rowOf.value(key, -1);
+        if (row >= 0) {
+            const QModelIndex i = index(row);
+            emit dataChanged(i, i, {Qt::DecorationRole});
+        }
+    }
+
+    QList<Row> m_rows;
+    QHash<QString, int> m_rowOf;
+    QPixmap m_blank;
+    mutable QThreadPool m_pool;
+    mutable QSet<QString> m_pending;
+    static QHash<QString, QPixmap> s_cache;
+};
+
+QHash<QString, QPixmap> ClipartModel::s_cache;
 
 ClipartPanel::ClipartPanel(QWidget* parent) : QWidget(parent)
 {
@@ -101,25 +201,54 @@ ClipartPanel::ClipartPanel(QWidget* parent) : QWidget(parent)
     lay->setContentsMargins(4, 4, 4, 4);
     lay->setSpacing(4);
 
+    auto* searchRow = new QHBoxLayout;
+    searchRow->setSpacing(2);
     m_search = new QLineEdit;
     m_search->setPlaceholderText(tr("Поиск по названию"));
+    m_search->setToolTip(tr("Можно искать по-русски: «коробка» найдёт и значки box, package"));
     m_search->setClearButtonEnabled(true);
-    connect(m_search, &QLineEdit::textChanged, this, [this] { applyFilter(); });
-    lay->addWidget(m_search);
+    auto* filterTimer = new QTimer(this);
+    filterTimer->setSingleShot(true);
+    filterTimer->setInterval(150);
+    connect(filterTimer, &QTimer::timeout, this, [this] { applyFilter(); });
+    connect(m_search, &QLineEdit::textChanged, filterTimer, qOverload<>(&QTimer::start));
+    searchRow->addWidget(m_search, 1);
+    auto* web = new QToolButton;
+    web->setText(tr("В интернете"));
+    web->setToolTip(tr("Искать этот значок в свободных наборах Iconify и скачать в галерею"));
+    web->setAutoRaise(true);
+    connect(web, &QToolButton::clicked, this, [this] { openDownloads(m_search->text().trimmed()); });
+    searchRow->addWidget(web);
+    lay->addLayout(searchRow);
 
     m_tabs = new QTabBar;
     m_tabs->setUsesScrollButtons(true);
     m_tabs->setExpanding(false);
     m_tabs->setDocumentMode(true);
     m_tabs->setElideMode(Qt::ElideNone);
-    connect(m_tabs, &QTabBar::currentChanged, this, [this] { applyFilter(); });
+    connect(m_tabs, &QTabBar::currentChanged, this, [this] {
+        updateSections();
+        applyFilter();
+    });
     lay->addWidget(m_tabs);
 
-    m_list = new ClipartList;
+    m_section = new QComboBox;
+    m_section->setToolTip(tr("Раздел набора"));
+    m_section->setVisible(false);
+    connect(m_section, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { applyFilter(); });
+    lay->addWidget(m_section);
+
+    m_model = new ClipartModel(this);
+    m_list = new QListView;
+    m_list->setObjectName(QStringLiteral("clipartList"));
+    m_list->setModel(m_model);
     m_list->setViewMode(QListView::IconMode);
     m_list->setIconSize(QSize(THUMB, THUMB));
-    m_list->setGridSize(QSize(THUMB + 40, THUMB + 40));  // room for two lines of the name
+    m_list->setGridSize(GRID);
+    m_list->setUniformItemSizes(true);  // the view then asks only the rows it shows
     m_list->setResizeMode(QListView::Adjust);
+    m_list->setLayoutMode(QListView::Batched);
+    m_list->setBatchSize(200);
     m_list->setMovement(QListView::Static);
     m_list->setWordWrap(true);
     m_list->setTextElideMode(Qt::ElideRight);
@@ -127,8 +256,8 @@ ClipartPanel::ClipartPanel(QWidget* parent) : QWidget(parent)
     m_list->setDragEnabled(true);
     m_list->setDragDropMode(QAbstractItemView::DragOnly);
     m_list->setDefaultDropAction(Qt::CopyAction);
-    connect(m_list, &QListWidget::itemActivated, this,
-            [this](QListWidgetItem* it) { emit insertRequested(it->data(Qt::UserRole).toString()); });
+    connect(m_list, &QListView::activated, this,
+            [this](const QModelIndex& i) { emit insertRequested(i.data(Qt::UserRole).toString()); });
     lay->addWidget(m_list, 1);
 
     auto* buttons = new QHBoxLayout;
@@ -140,16 +269,21 @@ ClipartPanel::ClipartPanel(QWidget* parent) : QWidget(parent)
         b->setAutoRaise(true);
         connect(b, &QToolButton::clicked, this, fn);
         buttons->addWidget(b);
+        return b;
     };
+    button(tr("Скачать значки…"), tr("Найти значки или загрузить целый набор из свободных коллекций Iconify"),
+           [this] { openDownloads(); })
+        ->setObjectName(QStringLiteral("clipartDownload"));
+    buttons->addStretch();
     button(tr("Открыть папку"), tr("Папка для своих картинок: подпапки становятся вкладками"),
            [this] { openUserFolder(); });
     button(tr("Обновить"), tr("Перечитать папки клипарта"), [this] { rescan(); });
-    buttons->addStretch();
-    button(tr("Где взять ещё…"), tr("Бесплатные коллекции значков и картинок"), [this] { showSources(); });
     lay->addLayout(buttons);
 
     rescan();
 }
+
+ClipartPanel::~ClipartPanel() = default;
 
 QString ClipartPanel::builtinDir()
 {
@@ -161,101 +295,160 @@ QString ClipartPanel::userDir()
     return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + QStringLiteral("/clipart");
 }
 
+int ClipartPanel::thumbnailsRendered() { return g_rendered; }
+
 void ClipartPanel::rescan()
 {
     QStringList patterns{QStringLiteral("*.svg"), QStringLiteral("*.svgz")};
     for (const QByteArray& fmt : QImageReader::supportedImageFormats())
         patterns << QStringLiteral("*.") + QString::fromLatin1(fmt);
     patterns.removeDuplicates();
-    const QDir::SortFlags sort = QDir::Name | QDir::IgnoreCase | QDir::LocaleAware;
+    const QDir::Filters files = QDir::Files | QDir::Readable;
+    const QDir::Filters dirs = QDir::Dirs | QDir::NoDotAndDotDot;
 
     m_entries.clear();
-    QStringList cats;
-    auto addFiles = [&](const QDir& dir, const QString& category) {
-        for (const QFileInfo& fi : dir.entryInfoList(patterns, QDir::Files | QDir::Readable, sort))
-            m_entries.append({fi.absoluteFilePath(), fi.completeBaseName(), category});
-        if (!cats.contains(category) && !dir.entryList(patterns, QDir::Files).isEmpty())
-            cats << category;
+    QSet<QString> cats;
+    auto addFiles = [&](const QString& dir, const QString& category, const QString& section) {
+        for (const QFileInfo& fi : QDir(dir).entryInfoList(patterns, files, QDir::NoSort)) {
+            const QString stamp =
+                QString::number(fi.lastModified().toMSecsSinceEpoch()) + QLatin1Char('|') + QString::number(fi.size());
+            m_entries.append({fi.absoluteFilePath(), fi.completeBaseName(), category, section, stamp});
+            cats.insert(category);
+        }
     };
     for (const QString& base : {builtinDir(), userDir()}) {
         const QDir root(base);
         if (!root.exists())
             continue;
-        addFiles(root, tr("Разное"));
-        for (const QFileInfo& sub : root.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, sort))
-            addFiles(QDir(sub.absoluteFilePath()), sub.fileName());
+        addFiles(base, tr("Разное"), QString());
+        for (const QFileInfo& cat : root.entryInfoList(dirs, QDir::NoSort)) {
+            addFiles(cat.absoluteFilePath(), cat.fileName(), QString());
+            for (const QFileInfo& sec : QDir(cat.absoluteFilePath()).entryInfoList(dirs, QDir::NoSort))
+                addFiles(sec.absoluteFilePath(), cat.fileName(), sec.fileName());
+        }
     }
-    std::sort(cats.begin(), cats.end(),
-              [](const QString& a, const QString& b) { return QString::localeAwareCompare(a, b) < 0; });
-    std::stable_sort(m_entries.begin(), m_entries.end(), [](const Entry& a, const Entry& b) {
-        return QString::localeAwareCompare(a.name, b.name) < 0;
-    });
+    // sort keys once: locale-aware comparison is too slow for thousands of names
+    QCollator coll;
+    coll.setCaseSensitivity(Qt::CaseInsensitive);
+    coll.setNumericMode(true);
+    std::stable_sort(m_entries.begin(), m_entries.end(),
+                     [&coll](const Entry& a, const Entry& b) { return coll.compare(a.name, b.name) < 0; });
+    QStringList sorted(cats.begin(), cats.end());
+    std::sort(sorted.begin(), sorted.end(), [&coll](const QString& a, const QString& b) { return coll.compare(a, b) < 0; });
 
     const QString current = m_tabs->currentIndex() > 0 ? m_tabs->tabText(m_tabs->currentIndex()) : QString();
-    m_categories = cats;
-    const QSignalBlocker block(m_tabs);
-    while (m_tabs->count())
-        m_tabs->removeTab(0);
-    m_tabs->addTab(tr("Все"));
-    for (const QString& c : m_categories)
-        m_tabs->addTab(c);
-    m_tabs->setCurrentIndex(std::max(0, int(m_categories.indexOf(current)) + 1));
+    m_categories = sorted;
+    {
+        const QSignalBlocker block(m_tabs);
+        while (m_tabs->count())
+            m_tabs->removeTab(0);
+        m_tabs->addTab(tr("Все"));
+        for (const QString& c : m_categories)
+            m_tabs->addTab(c);
+        m_tabs->setCurrentIndex(std::max(0, int(m_categories.indexOf(current)) + 1));
+    }
+    updateSections();
     applyFilter();
+}
+
+QStringList ClipartPanel::sections() const
+{
+    QStringList out;
+    for (int i = 1; i < m_section->count(); ++i)
+        if (m_section->itemData(i).toString() != LOOSE)
+            out << m_section->itemData(i).toString();
+    return out;
+}
+
+void ClipartPanel::updateSections()
+{
+    const int tab = m_tabs->currentIndex();
+    const QString category = tab > 0 ? m_tabs->tabText(tab) : QString();
+    const QString current = m_section->currentData().toString();
+    QSet<QString> secs;
+    bool loose = false;  // files directly in the category folder
+    if (!category.isEmpty())
+        for (const Entry& e : m_entries)
+            if (e.category == category) {
+                if (e.section.isEmpty())
+                    loose = true;
+                else
+                    secs.insert(e.section);
+            }
+    QStringList sorted(secs.begin(), secs.end());
+    QCollator coll;
+    coll.setNumericMode(true);
+    std::sort(sorted.begin(), sorted.end(), [&coll](const QString& a, const QString& b) { return coll.compare(a, b) < 0; });
+
+    const QSignalBlocker block(m_section);
+    m_section->clear();
+    m_section->addItem(tr("Все разделы"), QVariant());
+    for (const QString& s : sorted)
+        m_section->addItem(s, s);
+    if (loose && !sorted.isEmpty())
+        m_section->addItem(tr("Без раздела"), LOOSE);
+    const int i = m_section->findData(current);
+    m_section->setCurrentIndex(i > 0 ? i : 0);
+    m_section->setVisible(!sorted.isEmpty());
 }
 
 void ClipartPanel::applyFilter()
 {
-    const QString text = m_search->text().trimmed();
+    const iconwords::Matcher match(m_search->text().trimmed());
     const int tab = m_tabs->currentIndex();
     const QString category = tab > 0 ? m_tabs->tabText(tab) : QString();
-    m_list->clear();
+    const QVariant secData = m_section->isHidden() ? QVariant() : m_section->currentData();
+    const bool anySection = !secData.isValid();
+    const QString section = secData.toString() == LOOSE ? QString() : secData.toString();
+    QList<ClipartModel::Row> rows;
     for (const Entry& e : m_entries) {
         if (!category.isEmpty() && e.category != category)
             continue;
-        if (!text.isEmpty() && !e.name.contains(text, Qt::CaseInsensitive))
+        if (!anySection && e.section != section)
             continue;
-        auto* it = new QListWidgetItem(thumbnail(e.path), e.name);
-        it->setData(Qt::UserRole, e.path);
-        it->setToolTip(e.name + QLatin1Char('\n') + QDir::toNativeSeparators(e.path));
-        m_list->addItem(it);
+        if (!match.isEmpty() && !match(e.name))
+            continue;
+        rows.append({e.path, e.name, e.path + QLatin1Char('|') + e.stamp});
     }
+    m_model->setRows(std::move(rows));
 }
 
-int ClipartPanel::visibleCount() const { return m_list->count(); }
+int ClipartPanel::visibleCount() const { return m_model->rowCount(); }
 
-void ClipartPanel::setFilter(const QString& text) { m_search->setText(text); }
+void ClipartPanel::setFilter(const QString& text)
+{
+    m_search->setText(text);
+    applyFilter();  // at once, without the typing delay
+}
 
 void ClipartPanel::setCategory(int index) { m_tabs->setCurrentIndex(index); }
+
+void ClipartPanel::setSection(int index) { m_section->setCurrentIndex(index); }
+
+IconDownloadDialog* ClipartPanel::openDownloads(const QString& query)
+{
+    if (!m_downloads) {
+        m_downloads = new IconDownloadDialog(userDir(), window());
+        // new files appear in the panel while the window stays open
+        auto* debounce = new QTimer(m_downloads);
+        debounce->setSingleShot(true);
+        debounce->setInterval(300);
+        connect(debounce, &QTimer::timeout, this, [this] { rescan(); });
+        connect(m_downloads, &IconDownloadDialog::galleryChanged, debounce, qOverload<>(&QTimer::start));
+    }
+    if (!query.isEmpty())
+        m_downloads->search(query);
+    m_downloads->show();
+    m_downloads->raise();
+    m_downloads->activateWindow();
+    return m_downloads;
+}
 
 void ClipartPanel::openUserFolder()
 {
     const QString d = userDir();
     QDir().mkpath(d);
     QDesktopServices::openUrl(QUrl::fromLocalFile(d));
-}
-
-void ClipartPanel::showSources()
-{
-    QMessageBox box(this);
-    box.setWindowTitle(tr("Где взять ещё картинки"));
-    box.setIcon(QMessageBox::Information);
-    box.setTextFormat(Qt::RichText);
-    box.setTextInteractionFlags(Qt::TextBrowserInteraction);
-    box.setText(
-        tr("<p>Скачанные SVG и PNG положите в папку клипарта (кнопка «Открыть папку»), "
-           "по подпапкам — они станут вкладками — и нажмите «Обновить».</p>"
-           "<ul>"
-           "<li><a href=\"https://tabler.io/icons\">Tabler Icons</a> — тысячи значков, лицензия MIT</li>"
-           "<li><a href=\"https://fonts.google.com/icons\">Google Material Symbols</a> — значки, лицензия Apache 2.0</li>"
-           "<li><a href=\"https://openclipart.org\">Openclipart</a> — клипарт, общественное достояние (CC0)</li>"
-           "<li><a href=\"https://commons.wikimedia.org/wiki/Category:GHS_pictograms\">Wikimedia Commons</a> — "
-           "знаки GHS, ISO 7010 и многое другое; лицензия указана на странице каждого файла</li>"
-           "<li><a href=\"https://openmoji.org\">OpenMoji</a> — эмодзи, CC BY-SA 4.0: нужно указывать авторов</li>"
-           "<li><a href=\"https://www.svgrepo.com\">SVG Repo</a> — большая подборка, но лицензии разные: "
-           "проверяйте у каждого значка</li>"
-           "</ul>"
-           "<p>Для перекрашивания и чётких краёв на термопринтере лучше подходят одноцветные SVG.</p>"));
-    box.exec();
 }
 
 } // namespace lf

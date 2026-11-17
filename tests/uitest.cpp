@@ -6,6 +6,8 @@
 #include "data/DataLoader.h"
 #include "templates/TemplateLibrary.h"
 #include "ui/ClipartPanel.h"
+#include "ui/IconDownloadDialog.h"
+#include "TinyHttp.h"
 #include "ui/DataSourceDialog.h"
 #include "ui/LabelScene.h"
 #include "ui/LabelView.h"
@@ -20,6 +22,11 @@
 
 #include <QApplication>
 #include <QDir>
+#include <QElapsedTimer>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QListView>
 #include <QDockWidget>
 #include <QDropEvent>
 #include <QListWidget>
@@ -277,9 +284,10 @@ int main(int argc, char** argv)
         settle();
         CHECK(clip->visibleCount() == 1, "clipart: search is case-insensitive");
 
-        auto* list = clip->findChild<QListWidget*>();
+        auto* list = clip->findChild<QListView*>(QStringLiteral("clipartList"));
+        const QModelIndex first = list->model()->index(0, 0);
         const int n = int(scene->document()->objects.size());
-        const QPoint ip = list->visualItemRect(list->item(0)).center();
+        const QPoint ip = list->visualRect(first).center();
         // the same event sequence a real double click produces
         QWidget* lvp = list->viewport();
         mouse(lvp, QEvent::MouseButtonPress, ip, Qt::LeftButton);
@@ -294,7 +302,7 @@ int main(int argc, char** argv)
         settle();
 
         // drag data of an item is a file URL; drop it on the label at (10, 6) mm
-        std::unique_ptr<QMimeData> mime(list->model()->mimeData({list->indexFromItem(list->item(0))}));
+        std::unique_ptr<QMimeData> mime(list->model()->mimeData({first}));
         CHECK(mime && mime->hasUrls() && mime->urls().value(0).isLocalFile(), "clipart: drags as a file URL");
         const QPoint at = view->viewport()->mapTo(&w, view->mapFromScene(QPointF(10, 6)));
         QDragEnterEvent enter(at, Qt::CopyAction, mime.get(), Qt::LeftButton, Qt::NoModifier);
@@ -311,6 +319,137 @@ int main(int argc, char** argv)
         CHECK(im && std::abs(im->x - 10) < 0.5 && std::abs(im->y - 6) < 0.5, "clipart: dropped where the mouse is");
         undo->undo();
         clip->setFilter(QString());
+        settle();
+    }
+
+    // icon downloads from a fake Iconify server: search, add to the gallery, a whole set
+    {
+        auto* clip = w.findChild<ClipartPanel*>();
+        const QString setDir = ClipartPanel::userDir() + QStringLiteral("/Test Icons");
+        const QString manyDir = ClipartPanel::userDir() + QStringLiteral("/UiTest Many");
+        QDir(setDir).removeRecursively();
+        QDir(manyDir).removeRecursively();
+
+        QStringList setNames;
+        for (int i = 0; i < 350; ++i)
+            setNames << QStringLiteral("%1-%2").arg(QChar(QLatin1Char("abcde"[i % 5]))).arg(i, 3, 10, QLatin1Char('0'));
+        TinyHttp http([setNames](const QByteArray& target) {
+            const QByteArray json = "application/json";
+            const QByteArray testset =
+                R"({"name": "Test Icons", "total": 350, "license": {"title": "MIT", "spdx": "MIT"}, "category": "Test"})";
+            const QByteArray ncset =
+                R"({"name": "NC Icons", "total": 5, "license": {"title": "CC BY-NC 4.0", "spdx": "CC-BY-NC-4.0"}})";
+            if (target == "/collections")
+                return TinyHttp::response(200, json, "{\"testset\": " + testset + ", \"ncset\": " + ncset + "}");
+            if (target.startsWith("/search?"))
+                return TinyHttp::response(200, json,
+                                          R"({"icons": ["testset:box", "ncset:box", "testset:box-open"], "total": 3,
+                                              "collections": {"testset": )" +
+                                              testset + ", \"ncset\": " + ncset + "}}");
+            if (target == "/collection?prefix=testset") {
+                QJsonObject o;
+                o[QStringLiteral("prefix")] = QStringLiteral("testset");
+                o[QStringLiteral("uncategorized")] = QJsonArray::fromStringList(setNames);
+                o[QStringLiteral("hidden")] = QJsonArray({QStringLiteral("a-000")});
+                return TinyHttp::response(200, json, QJsonDocument(o).toJson());
+            }
+            if (target.startsWith("/testset.json?icons=")) {
+                QJsonObject icons;
+                for (const QByteArray& n : target.mid(target.indexOf('=') + 1).split(','))
+                    icons[QString::fromLatin1(n)] = QJsonObject(
+                        {{QStringLiteral("body"), QStringLiteral("<path d=\"M4 4h16v16H4z\" fill=\"currentColor\"/>")}});
+                QJsonObject o;
+                o[QStringLiteral("prefix")] = QStringLiteral("testset");
+                o[QStringLiteral("width")] = 24;
+                o[QStringLiteral("height")] = 24;
+                o[QStringLiteral("icons")] = icons;
+                return TinyHttp::response(200, json, QJsonDocument(o).toJson());
+            }
+            return TinyHttp::response(404, QByteArray(), QByteArray());
+        });
+        qputenv("LABELFORGE_ICONIFY_URL", http.base().toUtf8());
+
+        IconDownloadDialog* dlg = clip->openDownloads(QStringLiteral("коробка"));
+        CHECK(QTest::qWaitFor([dlg] { return !dlg->busy(); }, 5000), "icons: request finished");
+        std::printf("icon search: %d results, %s\n", dlg->resultCount(), qPrintable(dlg->status()));
+        CHECK(dlg->resultCount() == 2, "icons: russian query searched, non-free set dropped");
+        shot(dlg, out, QStringLiteral("13_icon_search"));
+        dlg->selectAllResults();
+        dlg->addSelected();
+        CHECK(QFile::exists(setDir + QStringLiteral("/box.svg")) && QFile::exists(setDir + QStringLiteral("/box-open.svg")) &&
+                  QFile::exists(setDir + QStringLiteral("/LICENSE.txt")),
+              "icons: search results saved to the set folder");
+
+        dlg->showSets();
+        CHECK(QTest::qWaitFor([dlg] { return !dlg->busy(); }, 5000), "icons: request finished");
+        CHECK(dlg->setCount() == 1, "icons: set list shows free sets only");
+        CHECK(dlg->downloadSet(QStringLiteral("testset")), "icons: set download starts");
+        CHECK(QTest::qWaitFor([dlg] { return !dlg->busy(); }, 20000), "icons: set download finished");
+        std::printf("icon set: %s\n", qPrintable(dlg->status()));
+        int files = 0;
+        for (const QString& letter : {QStringLiteral("A"), QStringLiteral("B"), QStringLiteral("C"), QStringLiteral("D"),
+                                      QStringLiteral("E")})
+            files += int(QDir(setDir + QLatin1Char('/') + letter).entryList({QStringLiteral("*.svg")}).size());
+        CHECK(files == 349, "icons: whole set saved in letter folders, hidden icon skipped");
+        CHECK(QFile::exists(setDir + QStringLiteral("/iconify-set.json")), "icons: set marked as complete");
+        shot(dlg, out, QStringLiteral("14_icon_sets"));
+        dlg->close();
+        settle(700);  // the panel rescans by itself after downloads
+
+        const QStringList cats = clip->categories();
+        CHECK(cats.contains(QStringLiteral("Test Icons")), "icons: set appears as a gallery tab");
+        clip->setFilter(QString());
+        const int before = ClipartPanel::thumbnailsRendered();
+        clip->setCategory(int(cats.indexOf(QStringLiteral("Test Icons"))) + 1);
+        settle(600);
+        const int rendered = ClipartPanel::thumbnailsRendered() - before;
+        std::printf("icon set tab: %d items, %d thumbnails rendered, sections %s\n", clip->visibleCount(), rendered,
+                    qPrintable(clip->sections().join(QLatin1Char(','))));
+        CHECK(clip->visibleCount() == 351, "icons: tab lists all icons of the set");
+        // the visible ones may already be cached from the "all" tab
+        CHECK(rendered < 200, "icons: only visible thumbnails are rendered");
+        CHECK(clip->sections() == QStringList({QStringLiteral("A"), QStringLiteral("B"), QStringLiteral("C"),
+                                               QStringLiteral("D"), QStringLiteral("E")}),
+              "icons: letter folders become sections");
+        shot(clip, out, QStringLiteral("15_clipart_set"));
+        clip->setSection(1);
+        settle();
+        CHECK(clip->visibleCount() == 69, "icons: section filters");
+        clip->setSection(6);
+        settle();
+        CHECK(clip->visibleCount() == 2, "icons: files outside sections");
+        clip->setSection(0);
+        clip->setCategory(0);
+        clip->setFilter(QStringLiteral("коробка"));
+        CHECK(clip->visibleCount() >= 2, "icons: russian search finds english names");
+        clip->setFilter(QString());
+
+        // a big folder: scanning is quick and only what is visible gets drawn
+        QDir().mkpath(manyDir);
+        for (int i = 0; i < 3000; ++i) {
+            QFile f(manyDir + QStringLiteral("/many-%1.svg").arg(i, 4, 10, QLatin1Char('0')));
+            if (f.open(QIODevice::WriteOnly))
+                f.write("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" "
+                        "r=\"8\"/></svg>");
+        }
+        QElapsedTimer t;
+        t.start();
+        clip->rescan();
+        const int many = int(clip->categories().indexOf(QStringLiteral("UiTest Many"))) + 1;
+        const int before2 = ClipartPanel::thumbnailsRendered();
+        clip->setCategory(many);
+        const qint64 ms = t.elapsed();
+        settle(800);
+        const int rendered2 = ClipartPanel::thumbnailsRendered() - before2;
+        std::printf("3000 pictures: rescan + tab %lld ms, %d thumbnails rendered\n", static_cast<long long>(ms), rendered2);
+        CHECK(clip->visibleCount() == 3000 && ms < 3000, "icons: 3000 pictures listed quickly");
+        CHECK(rendered2 > 0 && rendered2 < 300, "icons: 3000 pictures, few thumbnails rendered");
+
+        clip->setCategory(0);
+        QDir(setDir).removeRecursively();
+        QDir(manyDir).removeRecursively();
+        qunsetenv("LABELFORGE_ICONIFY_URL");
+        clip->rescan();
         settle();
     }
 

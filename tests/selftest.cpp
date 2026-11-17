@@ -2,6 +2,8 @@
 // Self-test: exercises variables, data loaders, barcodes, templates and exports.
 // Usage: labelforge_selftest <output-dir> [test.xlsx]
 #include "barcode/Barcode.h"
+#include "core/IconWords.h"
+#include "core/Iconify.h"
 #include "core/ImageEffects.h"
 #include "core/LabelDocument.h"
 #include "core/RemoteImage.h"
@@ -11,23 +13,21 @@
 #include "print/PrintJob.h"
 #include "print/ThermalExport.h"
 #include "templates/TemplateLibrary.h"
+#include "TinyHttp.h"
 
 #include <QApplication>
 #include <QBuffer>
 #include <QElapsedTimer>
-#include <QTcpServer>
-#include <QTcpSocket>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QPainter>
 #include <QSvgRenderer>
 #include <QTextStream>
-#include <atomic>
-#include <condition_variable>
 #include <cstdio>
-#include <mutex>
-#include <thread>
 
 using namespace lf;
 
@@ -215,71 +215,6 @@ static bool light(const QImage& img, double xmm, double ymm, double pxPerMm = 10
     return qGray(img.pixel(int(xmm * pxPerMm), int(ymm * pxPerMm))) > 200;
 }
 
-// Minimal HTTP server on 127.0.0.1 for the URL image test. Runs in its own
-// thread with the blocking socket API, because fetchUrl() blocks the caller.
-class TinyHttp {
-public:
-    explicit TinyHttp(QByteArray png) : m_png(std::move(png))
-    {
-        m_thread = std::thread([this] { run(); });
-        std::unique_lock<std::mutex> lock(m_mx);
-        m_cv.wait(lock, [this] { return m_port >= 0; });
-    }
-    ~TinyHttp()
-    {
-        m_stop = true;
-        m_thread.join();
-    }
-    QString url(const char* path) const
-    {
-        return QStringLiteral("http://127.0.0.1:%1%2").arg(m_port).arg(QLatin1String(path));
-    }
-    int requests() const { return m_requests; }
-
-private:
-    void run()
-    {
-        QTcpServer server;
-        const bool ok = server.listen(QHostAddress::LocalHost, 0);
-        {
-            std::lock_guard<std::mutex> lock(m_mx);
-            m_port = ok ? server.serverPort() : 0;
-        }
-        m_cv.notify_all();
-        while (ok && !m_stop) {
-            if (!server.waitForNewConnection(50))
-                continue;
-            QTcpSocket* sock = server.nextPendingConnection();
-            QByteArray req;
-            while (!req.contains("\r\n\r\n") && sock->waitForReadyRead(2000))
-                req += sock->readAll();
-            ++m_requests;
-            const QByteArray path = req.split(' ').value(1);
-            QByteArray resp;
-            if (path == "/red.png")
-                resp = "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: " +
-                       QByteArray::number(m_png.size()) + "\r\nConnection: close\r\n\r\n" + m_png;
-            else if (path == "/moved")
-                resp = "HTTP/1.1 302 Found\r\nLocation: /red.png\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            else
-                resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            sock->write(resp);
-            sock->waitForBytesWritten(2000);
-            sock->disconnectFromHost();
-            if (sock->state() != QAbstractSocket::UnconnectedState)
-                sock->waitForDisconnected(1000);
-            delete sock;
-        }
-    }
-    QByteArray m_png;
-    std::thread m_thread;
-    std::mutex m_mx;
-    std::condition_variable m_cv;
-    int m_port = -1;
-    std::atomic<bool> m_stop{false};
-    std::atomic<int> m_requests{0};
-};
-
 // Colours from data fields, data: URI and URL images, BLOB helpers.
 static void testDataBinding(const QDir& out)
 {
@@ -382,7 +317,13 @@ static void testDataBinding(const QDir& out)
     // URL images from a local HTTP server
     remote::clearCache();
     {
-        TinyHttp http(png);
+        TinyHttp http([png](const QByteArray& path) {
+            if (path == "/red.png")
+                return TinyHttp::response(200, "image/png", png);
+            if (path == "/moved")
+                return TinyHttp::response(302, QByteArray(), QByteArray(), "Location: /red.png\r\n");
+            return TinyHttp::response(404, QByteArray(), QByteArray());
+        });
         vals[1] = http.url("/red.png");
         CHECK(pix(renderLabelImage(idoc, ctx, 254, false), 5, 5) == QColor(255, 0, 0), "url: image downloaded");
         vals[1] = http.url("/moved");
@@ -405,6 +346,124 @@ static void testDataBinding(const QDir& out)
         PrintJob job(idoc, data, idoc.print);
         CHECK(job.exportPdf(out.filePath(QStringLiteral("url_image.pdf")), &err), "url: pdf export");
     }
+}
+
+// Iconify response parsing, SVG building and the Russian word list.
+static void testIconify(const QDir& out)
+{
+    using namespace iconify;
+    CHECK(isFreeLicense(QStringLiteral("MIT")) && isFreeLicense(QStringLiteral("CC0-1.0")) &&
+              !isFreeLicense(QStringLiteral("CC-BY-4.0")) && !isFreeLicense(QStringLiteral("CC-BY-NC-4.0")) &&
+              !isFreeLicense(QString()),
+          "iconify: license filter");
+
+    const QByteArray cols = R"({
+        "tabler": {"name": "Tabler Icons", "total": 6545, "author": {"name": "Pawel Kuna", "url": "https://x"},
+                   "license": {"title": "MIT", "spdx": "MIT", "url": "https://l"}, "category": "UI 24px"},
+        "old": {"name": "Old", "total": 3, "hidden": true, "license": {"spdx": "MIT"}},
+        "art": {"name": "Art", "total": 9, "palette": true, "license": {"title": "CC BY 4.0", "spdx": "CC-BY-4.0"}}
+    })";
+    const QList<Collection> cl = parseCollections(cols);
+    CHECK(cl.size() == 2 && cl[0].prefix == QStringLiteral("art") && cl[1].name == QStringLiteral("Tabler Icons") &&
+              cl[1].total == 6545 && cl[1].author == QStringLiteral("Pawel Kuna") && cl[1].licenseSpdx == QStringLiteral("MIT") &&
+              cl[0].palette,
+          "iconify: collections parsed, hidden skipped, sorted");
+    CHECK(licenseNote(cl[1]).contains(QStringLiteral("MIT")) && licenseNote(cl[1]).contains(QStringLiteral("tabler")),
+          "iconify: license note");
+
+    const QByteArray search = R"({"icons": ["tabler:box", "art:box", "tabler:box-off", "bad"], "total": 4,
+        "collections": {"tabler": {"name": "Tabler Icons", "license": {"spdx": "MIT"}},
+                        "art": {"name": "Art", "license": {"spdx": "CC-BY-4.0"}}}})";
+    const SearchResult sr = parseSearch(search);
+    CHECK(sr.icons == QStringList({QStringLiteral("tabler:box"), QStringLiteral("tabler:box-off")}) && sr.total == 4 &&
+              sr.collections.size() == 2,
+          "iconify: search drops non-free sets");
+
+    // categories, hidden icons and style variants
+    const QByteArray withCats = R"({"prefix": "m", "categories": {"Arrows": ["up", "up-rounded", "down"],
+        "Home/Garden": ["home", "home-sharp", "tree"]}, "uncategorized": ["misc"], "hidden": ["tree"],
+        "suffixes": {"": "Regular", "rounded": "Rounded", "sharp": "Sharp"}})";
+    const QMap<QString, QStringList> f1 = parseCollectionFolders(withCats);
+    CHECK(f1.value(QStringLiteral("Arrows")) == QStringList({QStringLiteral("down"), QStringLiteral("up")}) &&
+              f1.value(QStringLiteral("Home_Garden")) == QStringList({QStringLiteral("home")}) &&
+              f1.value(QStringLiteral("Другое")) == QStringList({QStringLiteral("misc")}) && f1.size() == 3,
+          "iconify: categories become folders, one style kept");
+    // no plain style: the most common style is kept
+    const QByteArray styles = R"({"uncategorized": ["a-bold", "b-bold", "a-linear"],
+        "suffixes": {"bold": "Bold", "linear": "Linear"}})";
+    CHECK(parseCollectionFolders(styles).value(QString()) == QStringList({QStringLiteral("a-bold"), QStringLiteral("b-bold")}),
+          "iconify: most common style without a plain one");
+    // a big set without categories is split by first letter
+    QJsonArray names;
+    for (int i = 0; i < 320; ++i)
+        names.append(QStringLiteral("%1icon-%2").arg(i % 3 == 0 ? QStringLiteral("a") : i % 3 == 1 ? QStringLiteral("B") : QStringLiteral("1")).arg(i));
+    QJsonObject big;
+    big[QStringLiteral("uncategorized")] = names;
+    const QMap<QString, QStringList> f2 = parseCollectionFolders(QJsonDocument(big).toJson());
+    CHECK(f2.keys() == QStringList({QStringLiteral("0-9"), QStringLiteral("A"), QStringLiteral("B")}) &&
+              f2.value(QStringLiteral("A")).size() == 107,
+          "iconify: big set split by letter");
+    QJsonObject small;
+    small[QStringLiteral("uncategorized")] = QJsonArray({QStringLiteral("x"), QStringLiteral("y")});
+    CHECK(parseCollectionFolders(QJsonDocument(small).toJson()).keys() == QStringList({QString()}),
+          "iconify: small set stays in one folder");
+    // a huge category is split into parts of at most 500
+    QJsonArray many;
+    for (int i = 0; i < 1201; ++i)
+        many.append(QStringLiteral("icon-%1").arg(i, 4, 10, QLatin1Char('0')));
+    QJsonObject huge;
+    huge[QStringLiteral("categories")] = QJsonObject({{QStringLiteral("Big"), many}});
+    const QMap<QString, QStringList> f3 = parseCollectionFolders(QJsonDocument(huge).toJson());
+    int f3total = 0, f3max = 0;
+    for (const QStringList& v : f3) {
+        f3total += int(v.size());
+        f3max = std::max(f3max, int(v.size()));
+    }
+    CHECK(f3.size() == 3 && f3total == 1201 && f3max <= 500 && f3.firstKey().startsWith(QStringLiteral("Big (icon")),
+          "iconify: huge folder split into parts");
+
+    // icon data -> SVG files
+    const QByteArray set = R"({"prefix": "t", "width": 24, "height": 24, "icons": {
+        "sq": {"body": "<rect width=\"24\" height=\"24\" fill=\"currentColor\"/>"},
+        "wide": {"body": "<rect width=\"32\" height=\"16\"/>", "width": 32, "height": 16}},
+        "aliases": {"sq2": {"parent": "sq"}, "sq3": {"parent": "sq2", "hFlip": true}, "lost": {"parent": "nope"}}})";
+    const QHash<QString, QByteArray> svgs = parseIconSet(set);
+    CHECK(svgs.size() == 4 && !svgs.contains(QStringLiteral("lost")), "iconify: icons and aliases");
+    const QByteArray sq = svgs.value(QStringLiteral("sq"));
+    CHECK(sq.contains("viewBox=\"0 0 24 24\"") && sq.contains("#000000") && !sq.contains("currentColor"),
+          "iconify: svg with black instead of currentColor");
+    CHECK(svgs.value(QStringLiteral("wide")).contains("viewBox=\"0 0 32 16\""), "iconify: own icon size");
+    CHECK(svgs.value(QStringLiteral("sq3")).contains("scale(-1 1)"), "iconify: alias transform");
+    QSvgRenderer r(sq);
+    CHECK(r.isValid() && r.defaultSize() == QSize(24, 24), "iconify: svg renders");
+    QImage img(24, 24, QImage::Format_ARGB32);
+    img.fill(Qt::white);
+    {
+        QPainter p(&img);
+        r.render(&p);
+    }
+    CHECK(qGray(img.pixel(12, 12)) < 20, "iconify: currentColor drawn black");
+    QFile f(out.filePath(QStringLiteral("iconify_sq.svg")));
+    if (f.open(QIODevice::WriteOnly))
+        f.write(sq);
+
+    CHECK(safeFileName(QStringLiteral("a/b:c*?")) == QStringLiteral("a_b_c__") && safeFileName(QStringLiteral("CON")) ==
+              QStringLiteral("CON_") && safeFileName(QStringLiteral(" dots... ")) == QStringLiteral("dots"),
+          "iconify: safe file names");
+
+    // Russian words
+    using namespace iconwords;
+    CHECK(translate(QStringLiteral("коробка")).contains(QStringLiteral("box")), "words: exact word");
+    CHECK(translate(QStringLiteral("коробки")).contains(QStringLiteral("box")), "words: other ending");
+    CHECK(translate(QStringLiteral("Стрел")).contains(QStringLiteral("arrow")), "words: beginning of a word");
+    CHECK(translate(QStringLiteral("ёж")).isEmpty() && translate(QStringLiteral("box")).isEmpty(), "words: unknown");
+    CHECK(englishQuery(QStringLiteral("красная коробка")) == QStringLiteral("красная box"), "words: query translation");
+    CHECK(englishQuery(QStringLiteral("box")) == QStringLiteral("box"), "words: english query kept");
+    CHECK(matches(QStringLiteral("box-off"), QStringLiteral("коробка")) &&
+              matches(QStringLiteral("Хрупкое"), QStringLiteral("хрупк")) &&
+              matches(QStringLiteral("arrow-up"), QStringLiteral("стрелка вверх")) &&
+              !matches(QStringLiteral("arrow-down"), QStringLiteral("стрелка вверх")),
+          "words: gallery matching");
 }
 
 // Shapes, frames, fills, shadows and line caps. Rendered at 254 dpi = 10 px/mm.
@@ -799,6 +858,7 @@ int main(int argc, char** argv)
     testClipart(out);
     testShapes(out);
     testDataBinding(out);
+    testIconify(out);
 
     QFile mf(out.filePath(QStringLiteral("barcodes.tsv")));
     mf.open(QIODevice::WriteOnly | QIODevice::Truncate);
