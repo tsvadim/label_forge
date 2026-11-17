@@ -1,0 +1,11 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">
+<path d="M53.8 8.6L76.7 48.2" stroke="#000" stroke-width="6" stroke-linecap="round"/>
+<path d="M84.3 61.4L69.9 52.1L83.4 44.3Z"/>
+<path d="M80.5 68.0L34.8 68.0" stroke="#000" stroke-width="6" stroke-linecap="round"/>
+<path d="M19.5 68.0L34.8 60.2L34.8 75.8Z"/>
+<path d="M15.7 61.4L38.6 21.8" stroke="#000" stroke-width="6" stroke-linecap="round"/>
+<path d="M46.2 8.6L45.3 25.7L31.8 17.9Z"/>
+<path d="M40.0 43.0L48.0 43.0L48.0 49.0L40.0 49.0L40.0 55.0L48.0 55.0M52.0 43.0L60.0 43.0L60.0 49.0L52.0 49.0L52.0 55.0L60.0 55.0" fill="none" stroke="#000" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M34.0 92.0L34.0 80.0L42.0 80.0L42.0 86.0L34.0 86.0M46.0 92.0L50.0 80.0L54.0 92.0M48.0 88.0L52.0 88.0M58.0 92.0L58.0 80.0L66.0 80.0L66.0 86.0L58.0 86.0" fill="none" stroke="#000" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

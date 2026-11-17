@@ -1,0 +1,7 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">
+<path d="M50 4V96M4 50H96" stroke="#000" stroke-width="4"/>
+<circle cx="50" cy="50" r="24" fill="#fff" stroke="#000" stroke-width="4"/>
+<path d="M50 50V26A24 24 0 0 1 74 50Z"/>
+<path d="M50 50V74A24 24 0 0 1 26 50Z"/>
+</svg>
