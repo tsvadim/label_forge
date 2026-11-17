@@ -6,8 +6,10 @@
 
 #include <QGraphicsSceneMouseEvent>
 #include <QGraphicsView>
+#include <QGuiApplication>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPalette>
 #include <cmath>
 
 namespace lf {
@@ -142,7 +144,9 @@ void LabelScene::notifyEditFinished()
 
 void LabelScene::drawBackground(QPainter* p, const QRectF& rect)
 {
-    p->fillRect(rect, QColor(0xdd, 0xe1, 0xe6));
+    // the desk around the label follows the theme; the label itself stays white
+    const bool dark = QGuiApplication::palette().color(QPalette::Window).lightness() < 128;
+    p->fillRect(rect, dark ? QColor(0x2b, 0x2e, 0x33) : QColor(0xdd, 0xe1, 0xe6));
     if (!m_doc)
         return;
     const QRectF lr(0, 0, m_doc->label.width, m_doc->label.height);

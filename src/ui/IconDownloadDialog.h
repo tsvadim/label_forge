@@ -43,6 +43,7 @@ public:
     void selectAllResults();
     void addSelected();
     bool downloadSet(const QString& prefix);  // false if the set is not in the list
+    bool removeSet(const QString& prefix, bool confirm);  // moves the set's folder to the recycle bin
     int setCount() const;
     QString status() const;
 
@@ -60,6 +61,7 @@ private:
     void nextBatch();
     void finishSet(bool cancelled);
     void updateAddButton();
+    void updateSetButtons();
     bool isSetComplete(const iconify::Collection& c) const;
 
     QString m_dir;
@@ -82,6 +84,7 @@ private:
     QLineEdit* m_setFilter;
     QTableWidget* m_sets;
     QPushButton* m_download;
+    QPushButton* m_remove;
     QPushButton* m_cancel;
     QProgressBar* m_progress;
     QLabel* m_setStatus;

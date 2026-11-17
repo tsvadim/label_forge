@@ -7,6 +7,7 @@
 #include "templates/TemplateLibrary.h"
 #include "ui/ClipartPanel.h"
 #include "ui/IconDownloadDialog.h"
+#include "ui/Icons.h"
 #include "TinyHttp.h"
 #include "ui/DataSourceDialog.h"
 #include "ui/LabelScene.h"
@@ -445,12 +446,73 @@ int main(int argc, char** argv)
         CHECK(clip->visibleCount() == 3000 && ms < 3000, "icons: 3000 pictures listed quickly");
         CHECK(rendered2 > 0 && rendered2 < 300, "icons: 3000 pictures, few thumbnails rendered");
 
+        // thumbnails sit on light cards (readable in a dark theme)
+        {
+            const QPixmap thumb = qvariant_cast<QPixmap>(
+                clip->findChild<QListView*>(QStringLiteral("clipartList"))->model()->index(0, 0).data(Qt::DecorationRole));
+            const QImage ti = thumb.toImage();
+            CHECK(!ti.isNull() && qGray(ti.pixel(ti.width() / 2, 3)) > 230, "theme: thumbnail on a light card");
+        }
+
+        // removing: built-in tabs cannot be removed, user folders go to the recycle bin
+        const QString trash = QDir::homePath() + QStringLiteral("/.local/share/Trash");
+        auto cleanTrash = [&trash](const QString& name) {
+            for (const QString& sub : {QStringLiteral("/files"), QStringLiteral("/info")})
+                for (const QFileInfo& fi : QDir(trash + sub).entryInfoList({name + QLatin1Char('*')},
+                                                                          QDir::AllEntries | QDir::NoDotAndDotDot)) {
+                    if (fi.isDir())
+                        QDir(fi.absoluteFilePath()).removeRecursively();
+                    else
+                        QFile::remove(fi.absoluteFilePath());
+                }
+        };
+        CHECK(!ClipartPanel::canRemoveCategory(QStringLiteral("Стрелки")) &&
+                  ClipartPanel::canRemoveCategory(QStringLiteral("Test Icons")),
+              "remove: only the user's folders can be removed");
+        CHECK(clip->removeCategory(QStringLiteral("Test Icons"), false) && !QFileInfo::exists(setDir) &&
+                  !clip->categories().contains(QStringLiteral("Test Icons")),
+              "remove: tab removed from the panel");
+        CHECK(!QDir(trash + QStringLiteral("/files")).entryList({QStringLiteral("Test Icons*")}, QDir::Dirs).isEmpty(),
+              "remove: folder is in the recycle bin");
+        cleanTrash(QStringLiteral("Test Icons"));
+        // the download window removes a set too
+        dlg->addSelected();
+        CHECK(QFileInfo::exists(setDir), "remove: set added again");
+        CHECK(dlg->removeSet(QStringLiteral("testset"), false) && !QFileInfo::exists(setDir), "remove: set removed from the download window");
+        cleanTrash(QStringLiteral("Test Icons"));
+        CHECK(!ClipartPanel::removeGalleryFolder(nullptr, ClipartPanel::builtinDir() + QStringLiteral("/Стрелки"), false) &&
+                  QFileInfo::exists(ClipartPanel::builtinDir() + QStringLiteral("/Стрелки")),
+              "remove: nothing outside the user's gallery");
+
         clip->setCategory(0);
         QDir(setDir).removeRecursively();
         QDir(manyDir).removeRecursively();
         qunsetenv("LABELFORGE_ICONIFY_URL");
         clip->rescan();
         settle();
+    }
+
+    // dark theme: interface icons turn light, the label stays white
+    {
+        const QPalette light = QApplication::palette();
+        auto strokeGray = [] { return qGray(icons::get(QStringLiteral("rect")).pixmap(32, 32).toImage().pixel(5, 16)); };
+        CHECK(strokeGray() < 110, "theme: dark icon lines in a light theme");
+        QPalette dark;
+        dark.setColor(QPalette::Window, QColor(32, 33, 36));
+        dark.setColor(QPalette::WindowText, QColor(230, 230, 230));
+        dark.setColor(QPalette::Base, QColor(24, 25, 27));
+        dark.setColor(QPalette::AlternateBase, QColor(40, 41, 45));
+        dark.setColor(QPalette::Text, QColor(230, 230, 230));
+        dark.setColor(QPalette::Button, QColor(45, 46, 50));
+        dark.setColor(QPalette::ButtonText, QColor(230, 230, 230));
+        dark.setColor(QPalette::Highlight, QColor(60, 120, 200));
+        QApplication::setPalette(dark);
+        settle();
+        CHECK(strokeGray() > 160, "theme: light icon lines in a dark theme");
+        shot(&w, out, QStringLiteral("16_dark_theme"));
+        QApplication::setPalette(light);
+        settle();
+        CHECK(strokeGray() < 110, "theme: icons follow the switch back");
     }
 
     // shape tool: pick a kind from the menu, click on the label, edit the effects

@@ -3,17 +3,33 @@
 
 #include "core/ShapePaths.h"
 
+#include <QGuiApplication>
 #include <QHash>
+#include <QIconEngine>
+#include <QPalette>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
+#include <algorithm>
 #include <cmath>
+#include <functional>
 
 namespace lf::icons {
 
 namespace {
-const QColor INK(52, 58, 64);
-const QColor ACCENT(33, 113, 181);
+// Colours of the theme the icon is drawn for. Icons are painted on demand
+// (ThemedEngine), so they follow a switch between light and dark themes.
+struct Colors {
+    QColor ink, accent, paper;
+};
+const Colors LIGHT{QColor(52, 58, 64), QColor(33, 113, 181), QColor(Qt::white)};
+const Colors DARK{QColor(222, 226, 230), QColor(110, 172, 232), QColor(48, 52, 58)};
+Colors C = LIGHT;  // used by the drawing functions below (GUI thread only)
+
+bool isDark()
+{
+    return QGuiApplication::palette().color(QPalette::Window).lightness() < 128;
+}
 
 void drawBars(QPainter& p, const QRectF& r)
 {
@@ -23,7 +39,7 @@ void drawBars(QPainter& p, const QRectF& r)
     const double unit = r.width() / 25.0;
     for (int w : pattern) {
         if (bar)
-            p.fillRect(QRectF(x, r.top(), w * unit, r.height()), INK);
+            p.fillRect(QRectF(x, r.top(), w * unit, r.height()), C.ink);
         x += w * unit;
         bar = !bar;
         if (x > r.right())
@@ -35,16 +51,16 @@ void drawQr(QPainter& p, const QRectF& r)
 {
     const double m = r.width() / 7.0;
     auto finder = [&](double x, double y) {
-        p.fillRect(QRectF(x, y, 3 * m, 3 * m), INK);
-        p.fillRect(QRectF(x + m * 0.6, y + m * 0.6, 1.8 * m, 1.8 * m), Qt::white);
-        p.fillRect(QRectF(x + m, y + m, m, m), INK);
+        p.fillRect(QRectF(x, y, 3 * m, 3 * m), C.ink);
+        p.fillRect(QRectF(x + m * 0.6, y + m * 0.6, 1.8 * m, 1.8 * m), C.paper);
+        p.fillRect(QRectF(x + m, y + m, m, m), C.ink);
     };
     finder(r.left(), r.top());
     finder(r.right() - 3 * m, r.top());
     finder(r.left(), r.bottom() - 3 * m);
     const int dots[][2] = {{4, 4}, {5, 5}, {6, 4}, {4, 6}, {6, 6}, {5, 3}};
     for (auto& d : dots)
-        p.fillRect(QRectF(r.left() + d[0] * m, r.top() + d[1] * m, m, m), INK);
+        p.fillRect(QRectF(r.left() + d[0] * m, r.top() + d[1] * m, m, m), C.ink);
 }
 
 QPixmap paint(const QString& name, int s)
@@ -55,7 +71,7 @@ QPixmap paint(const QString& name, int s)
     p.setRenderHint(QPainter::Antialiasing);
     const double u = s / 32.0;
     p.scale(u, u);
-    QPen pen(INK, 2.2);
+    QPen pen(C.ink, 2.2);
     pen.setJoinStyle(Qt::RoundJoin);
     pen.setCapStyle(Qt::RoundCap);
     p.setPen(pen);
@@ -74,7 +90,7 @@ QPixmap paint(const QString& name, int s)
         a.lineTo(17, 19);
         a.lineTo(24, 19);
         a.closeSubpath();
-        p.setBrush(Qt::white);
+        p.setBrush(C.paper);
         p.drawPath(a);
     } else if (name == QLatin1String("text")) {
         p.setFont(f);
@@ -87,7 +103,7 @@ QPixmap paint(const QString& name, int s)
         p.drawLine(QPointF(5, 26), QPointF(27, 6));
     } else if (name == QLatin1String("image")) {
         p.drawRoundedRect(QRectF(4, 6, 24, 20), 2, 2);
-        p.setBrush(INK);
+        p.setBrush(C.ink);
         QPainterPath m;
         m.moveTo(7, 23);
         m.lineTo(13, 14);
@@ -103,7 +119,7 @@ QPixmap paint(const QString& name, int s)
         drawQr(p, QRectF(5, 5, 22, 22));
     } else if (name == QLatin1String("new")) {
         p.drawRoundedRect(QRectF(6, 9, 20, 15), 2, 2);
-        p.setPen(QPen(ACCENT, 2.6, Qt::SolidLine, Qt::RoundCap));
+        p.setPen(QPen(C.accent, 2.6, Qt::SolidLine, Qt::RoundCap));
         p.drawLine(QPointF(24, 3), QPointF(24, 11));
         p.drawLine(QPointF(20, 7), QPointF(28, 7));
     } else if (name == QLatin1String("open")) {
@@ -123,7 +139,7 @@ QPixmap paint(const QString& name, int s)
     } else if (name == QLatin1String("print")) {
         p.drawRect(QRectF(9, 4, 14, 8));
         p.drawRoundedRect(QRectF(4, 12, 24, 10), 2, 2);
-        p.setBrush(Qt::white);
+        p.setBrush(C.paper);
         p.drawRect(QRectF(9, 18, 14, 10));
     } else if (name == QLatin1String("pdf")) {
         p.drawRect(QRectF(7, 3, 18, 26));
@@ -147,7 +163,7 @@ QPixmap paint(const QString& name, int s)
         a.moveTo(9, 14);
         a.cubicTo(13, 7, 27, 7, 26, 20);
         p.drawPath(a);
-        p.setBrush(INK);
+        p.setBrush(C.ink);
         QPainterPath h;
         h.moveTo(4, 10);
         h.lineTo(12, 18);
@@ -165,7 +181,7 @@ QPixmap paint(const QString& name, int s)
         if (name == QLatin1String("zoom-fit"))
             p.drawRect(QRectF(9, 9, 8, 8));
     } else if (name.startsWith(QLatin1String("align-"))) {
-        p.setPen(QPen(ACCENT, 2.2));
+        p.setPen(QPen(C.accent, 2.2));
         const QString a = name.mid(6);
         if (a == QLatin1String("left"))
             p.drawLine(QPointF(5, 3), QPointF(5, 29));
@@ -180,7 +196,7 @@ QPixmap paint(const QString& name, int s)
         else
             p.drawLine(QPointF(3, 27), QPointF(29, 27));
         p.setPen(Qt::NoPen);
-        p.setBrush(INK);
+        p.setBrush(C.ink);
         const bool vertical = a == QLatin1String("left") || a == QLatin1String("hcenter") ||
                               a == QLatin1String("right");
         if (vertical) {
@@ -196,9 +212,9 @@ QPixmap paint(const QString& name, int s)
         }
     } else if (name == QLatin1String("front") || name == QLatin1String("back")) {
         const bool front = name == QLatin1String("front");
-        p.setBrush(front ? Qt::white : QBrush(ACCENT));
+        p.setBrush(front ? QBrush(C.paper) : QBrush(C.accent));
         p.drawRect(QRectF(4, 4, 16, 16));
-        p.setBrush(front ? QBrush(ACCENT) : Qt::white);
+        p.setBrush(front ? QBrush(C.accent) : QBrush(C.paper));
         p.drawRect(QRectF(12, 12, 16, 16));
     } else if (name == QLatin1String("delete")) {
         p.setPen(QPen(QColor(190, 40, 40), 2.6, Qt::SolidLine, Qt::RoundCap));
@@ -206,13 +222,13 @@ QPixmap paint(const QString& name, int s)
         p.drawLine(QPointF(24, 8), QPointF(8, 24));
     } else if (name == QLatin1String("template")) {
         p.drawRoundedRect(QRectF(4, 4, 24, 24), 2, 2);
-        p.setBrush(INK);
+        p.setBrush(C.ink);
         p.drawRect(QRectF(8, 8, 16, 4));
         p.setBrush(Qt::NoBrush);
         p.drawRect(QRectF(8, 15, 7, 9));
         p.drawRect(QRectF(18, 15, 6, 9));
     } else if (name == QLatin1String("grid")) {
-        p.setPen(QPen(INK, 1.6));
+        p.setPen(QPen(C.ink, 1.6));
         for (int i = 6; i <= 26; i += 5) {
             p.drawLine(QPointF(i, 4), QPointF(i, 28));
             p.drawLine(QPointF(4, i), QPointF(28, i));
@@ -228,7 +244,7 @@ QPixmap paint(const QString& name, int s)
         p.drawLine(QPointF(8, 8), QPointF(8, 4));
         p.drawLine(QPointF(24, 8), QPointF(24, 4));
     } else if (name == QLatin1String("label")) {
-        p.setBrush(Qt::white);
+        p.setBrush(C.paper);
         p.drawRoundedRect(QRectF(3, 7, 26, 18), 4, 4);
         drawBars(p, QRectF(8, 11, 16, 10));
     } else if (name == QLatin1String("clipart")) {
@@ -245,7 +261,7 @@ QPixmap paint(const QString& name, int s)
                 star.lineTo(pt);
         }
         star.closeSubpath();
-        p.setBrush(ACCENT);
+        p.setBrush(C.accent);
         p.drawPath(star);
         QPainterPath heart;
         heart.moveTo(23, 28);
@@ -253,7 +269,7 @@ QPixmap paint(const QString& name, int s)
         heart.cubicTo(22, 15.7, 23, 17, 23, 17);
         heart.cubicTo(23, 17, 24, 15.7, 25.5, 15);
         heart.cubicTo(30, 13, 33, 21, 23, 28);
-        p.setBrush(INK);
+        p.setBrush(C.ink);
         p.drawPath(heart);
     }
     p.end();
@@ -261,17 +277,60 @@ QPixmap paint(const QString& name, int s)
 }
 } // namespace
 
+namespace {
+// Draws the icon when it is shown, in the colours of the current theme.
+class ThemedEngine : public QIconEngine {
+public:
+    ThemedEngine(QString key, std::function<QPixmap(int)> draw) : m_key(std::move(key)), m_draw(std::move(draw)) {}
+
+    QSize actualSize(const QSize& size, QIcon::Mode, QIcon::State) override { return size; }
+    void paint(QPainter* p, const QRect& rect, QIcon::Mode mode, QIcon::State state) override
+    {
+        const qreal dpr = p->device() ? p->device()->devicePixelRatioF() : 1.0;
+        p->drawPixmap(rect, scaledPixmap(rect.size(), mode, state, dpr));
+    }
+    QPixmap pixmap(const QSize& size, QIcon::Mode mode, QIcon::State state) override
+    {
+        return scaledPixmap(size, mode, state, 1.0);
+    }
+    QPixmap scaledPixmap(const QSize& size, QIcon::Mode mode, QIcon::State, qreal scale) override
+    {
+        const int px = std::max(1, int(std::lround(std::min(size.width(), size.height()) * scale)));
+        const bool dark = isDark();
+        const QString key = m_key + QLatin1Char('|') + QString::number(px) + (dark ? QLatin1Char('d') : QLatin1Char('l')) +
+                            QString::number(int(mode));
+        static QHash<QString, QPixmap> cache;
+        auto it = cache.constFind(key);
+        if (it != cache.constEnd())
+            return *it;
+        C = dark ? DARK : LIGHT;
+        QPixmap pm = m_draw(px);
+        C = LIGHT;
+        if (mode == QIcon::Disabled) {
+            QPixmap faded(pm.size());
+            faded.fill(Qt::transparent);
+            QPainter fp(&faded);
+            fp.setOpacity(0.35);
+            fp.drawPixmap(0, 0, pm);
+            fp.end();
+            pm = faded;
+        }
+        pm.setDevicePixelRatio(scale);
+        cache.insert(key, pm);
+        return pm;
+    }
+    QIconEngine* clone() const override { return new ThemedEngine(m_key, m_draw); }
+    QString key() const override { return QStringLiteral("lf-themed"); }
+
+private:
+    QString m_key;
+    std::function<QPixmap(int)> m_draw;
+};
+} // namespace
+
 QIcon get(const QString& name)
 {
-    static QHash<QString, QIcon> cache;
-    auto it = cache.find(name);
-    if (it != cache.end())
-        return *it;
-    QIcon icon;
-    for (int s : {16, 24, 32, 48})
-        icon.addPixmap(paint(name, s));
-    cache.insert(name, icon);
-    return icon;
+    return QIcon(new ThemedEngine(QStringLiteral("get:") + name, [name](int s) { return paint(name, s); }));
 }
 
 QIcon appIcon()
@@ -284,7 +343,7 @@ QIcon appIcon()
         p.setRenderHint(QPainter::Antialiasing);
         p.scale(s / 32.0, s / 32.0);
         p.setPen(Qt::NoPen);
-        p.setBrush(ACCENT);
+        p.setBrush(LIGHT.accent);
         p.drawRoundedRect(QRectF(1, 4, 30, 24), 5, 5);
         p.setBrush(Qt::white);
         p.drawRoundedRect(QRectF(4, 7, 24, 18), 3, 3);
@@ -293,6 +352,24 @@ QIcon appIcon()
         icon.addPixmap(pm);
     }
     return icon;
+}
+
+QImage thumbnailTile(int size)
+{
+    QImage img(size, size, QImage::Format_ARGB32_Premultiplied);
+    img.fill(Qt::transparent);
+    QPainter p(&img);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setPen(QPen(QColor(0, 0, 0, 45), 1));
+    p.setBrush(QColor(252, 252, 252));
+    p.drawRoundedRect(QRectF(0.5, 0.5, size - 1, size - 1), size / 10.0, size / 10.0);
+    return img;
+}
+
+QRectF tileInner(int size)
+{
+    const double pad = std::max(2.0, size / 12.0);
+    return QRectF(pad, pad, size - 2 * pad, size - 2 * pad);
 }
 
 QIcon colorSwatch(const QColor& c)
@@ -322,23 +399,21 @@ QIcon shape(int kind)
     int dec;
     shapes::paramRange(kind, 1, &mn, &mx, &d1, &dec);
     shapes::paramRange(kind, 2, &mn, &mx, &d2, &dec);
-    QIcon icon;
-    for (int s : {16, 24, 32, 48}) {
+    return QIcon(new ThemedEngine(QStringLiteral("shape:%1").arg(kind), [=](int s) {
         QPixmap pm(s, s);
         pm.fill(Qt::transparent);
         QPainter p(&pm);
         p.setRenderHint(QPainter::Antialiasing);
         p.scale(s / 32.0, s / 32.0);
         p.translate((32 - w) / 2, (32 - h) / 2);
-        QPen pen(INK, 1.6);
+        QPen pen(C.ink, 1.6);
         pen.setJoinStyle(Qt::RoundJoin);
         p.setPen(pen);
-        p.setBrush(QColor(ACCENT.red(), ACCENT.green(), ACCENT.blue(), 90));
+        p.setBrush(QColor(C.accent.red(), C.accent.green(), C.accent.blue(), 90));
         p.drawPath(shapes::shapePath(kind, w, h, d1, d2));
         p.end();
-        icon.addPixmap(pm);
-    }
-    return icon;
+        return pm;
+    }));
 }
 
 } // namespace lf::icons

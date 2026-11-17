@@ -2,6 +2,7 @@
 #include "ClipartPanel.h"
 
 #include "IconDownloadDialog.h"
+#include "Icons.h"
 #include "core/IconWords.h"
 
 #include <QAbstractListModel>
@@ -11,12 +12,15 @@
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
+#include <QDirIterator>
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QHash>
 #include <QImageReader>
 #include <QLineEdit>
 #include <QListView>
+#include <QMenu>
+#include <QMessageBox>
 #include <QMimeData>
 #include <QPainter>
 #include <QPixmap>
@@ -51,7 +55,12 @@ bool isSvgFile(const QString& path)
 // Runs in a worker thread: only QImage, no QPixmap.
 QImage renderThumbnail(const QString& path)
 {
-    QImage img;
+    // the picture sits on a light card, whatever the theme
+    QImage img = icons::thumbnailTile(THUMB);
+    const QRectF inner = icons::tileInner(THUMB);
+    QPainter p(&img);
+    p.setRenderHint(QPainter::SmoothPixmapTransform);
+    bool ok = false;
     if (isSvgFile(path)) {
         QSvgRenderer r(path);
         if (r.isValid()) {
@@ -60,24 +69,27 @@ QImage renderThumbnail(const QString& path)
                 s = r.viewBoxF().size();
             if (s.isEmpty())
                 s = QSizeF(1, 1);
-            s.scale(THUMB, THUMB, Qt::KeepAspectRatio);
-            img = QImage(THUMB, THUMB, QImage::Format_ARGB32_Premultiplied);
-            img.fill(Qt::transparent);
-            QPainter p(&img);
-            r.render(&p, QRectF((THUMB - s.width()) / 2, (THUMB - s.height()) / 2, s.width(), s.height()));
+            s.scale(inner.size(), Qt::KeepAspectRatio);
+            r.render(&p, QRectF(inner.center() - QPointF(s.width() / 2, s.height() / 2), s));
+            ok = true;
         }
     } else {
         QImageReader reader(path);
         reader.setAutoTransform(true);
         QSize s = reader.size();
         if (s.isValid()) {
-            s.scale(THUMB, THUMB, Qt::KeepAspectRatio);
+            s.scale(inner.size().toSize(), Qt::KeepAspectRatio);
             reader.setScaledSize(s.expandedTo(QSize(1, 1)));
         }
-        img = reader.read();
+        const QImage pic = reader.read();
+        if (!pic.isNull()) {
+            p.drawImage(QRectF(inner.center() - QPointF(pic.width() / 2.0, pic.height() / 2.0), QSizeF(pic.size())), pic);
+            ok = true;
+        }
     }
+    p.end();
     ++g_rendered;
-    return img;
+    return ok ? img : QImage();
 }
 } // namespace
 
@@ -229,6 +241,25 @@ ClipartPanel::ClipartPanel(QWidget* parent) : QWidget(parent)
     connect(m_tabs, &QTabBar::currentChanged, this, [this] {
         updateSections();
         applyFilter();
+    });
+    // right click on a tab: remove a downloaded set or the user's own folder
+    m_tabs->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_tabs, &QWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+        const int i = m_tabs->tabAt(pos);
+        if (i <= 0)
+            return;
+        const QString name = m_tabs->tabText(i);
+        QMenu menu(this);
+        if (canRemoveCategory(name)) {
+            menu.addAction(tr("Открыть папку"), this, [name] {
+                QDesktopServices::openUrl(QUrl::fromLocalFile(userDir() + QLatin1Char('/') + name));
+            });
+            menu.addSeparator();
+            menu.addAction(tr("Удалить вкладку «%1»…").arg(name), this, [this, name] { removeCategory(name); });
+        } else {
+            menu.addAction(tr("Встроенную вкладку удалить нельзя"))->setEnabled(false);
+        }
+        menu.exec(m_tabs->mapToGlobal(pos));
     });
     lay->addWidget(m_tabs);
 
@@ -449,6 +480,69 @@ void ClipartPanel::openUserFolder()
     const QString d = userDir();
     QDir().mkpath(d);
     QDesktopServices::openUrl(QUrl::fromLocalFile(d));
+}
+
+bool ClipartPanel::canRemoveCategory(const QString& name)
+{
+    return !name.isEmpty() && QFileInfo(userDir() + QLatin1Char('/') + name).isDir();
+}
+
+bool ClipartPanel::removeCategory(const QString& name, bool confirm)
+{
+    if (!canRemoveCategory(name))
+        return false;
+    const bool ok = removeGalleryFolder(this, userDir() + QLatin1Char('/') + name, confirm);
+    if (ok)
+        rescan();
+    return ok;
+}
+
+bool ClipartPanel::removeGalleryFolder(QWidget* parent, const QString& path, bool confirm)
+{
+    const QFileInfo fi(path);
+    if (!fi.isDir())
+        return false;
+    // never anything outside the user's gallery
+    const QString root = QDir(userDir()).canonicalPath();
+    if (root.isEmpty() || !fi.canonicalFilePath().startsWith(root + QLatin1Char('/')))
+        return false;
+    const QString name = fi.fileName();
+
+    if (confirm) {
+        int pictures = 0;
+        for (QDirIterator it(path, QDir::Files, QDirIterator::Subdirectories); it.hasNext();) {
+            it.next();
+            const QString s = it.fileInfo().suffix().toLower();
+            if (s != QLatin1String("txt") && s != QLatin1String("json"))
+                ++pictures;
+        }
+        QString text = tr("Удалить «%1» из галереи?\n\nКартинок: %2. Папка будет перемещена в Корзину, оттуда её "
+                          "можно восстановить. Этикетки, в которые эти картинки уже вставлены, не изменятся.")
+                           .arg(name)
+                           .arg(pictures);
+        if (QFileInfo(builtinDir() + QLatin1Char('/') + name).isDir())
+            text += QLatin1Char('\n') + tr("Встроенные картинки этой вкладки останутся.");
+        if (QMessageBox::question(parent, tr("Удалить из галереи"), text, QMessageBox::Yes | QMessageBox::No,
+                                  QMessageBox::No) != QMessageBox::Yes)
+            return false;
+    }
+    if (QFile::moveToTrash(path))
+        return true;
+    // no recycle bin (network drive, unusual setup): delete for good only after a second question
+    if (!confirm ||
+        QMessageBox::warning(parent, tr("Удалить из галереи"),
+                             tr("Не получилось переместить «%1» в Корзину.\nУдалить папку окончательно? "
+                                "Восстановить её будет нельзя.")
+                                 .arg(name),
+                             QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+        return false;
+    if (QDir(path).removeRecursively())
+        return true;
+    QMessageBox::warning(parent, tr("Удалить из галереи"),
+                         tr("Не удалось удалить папку «%1» полностью: возможно, какие-то файлы открыты в другой "
+                            "программе.")
+                             .arg(QDir::toNativeSeparators(path)));
+    return false;
 }
 
 } // namespace lf

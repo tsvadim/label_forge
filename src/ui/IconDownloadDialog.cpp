@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "IconDownloadDialog.h"
 
+#include "ClipartPanel.h"
+#include "Icons.h"
 #include "core/IconWords.h"
 
 #include <QDir>
@@ -37,16 +39,17 @@ enum Roles { SvgRole = Qt::UserRole, PrefixRole, NameRole };
 
 QIcon svgIcon(const QByteArray& svg)
 {
+    // on a light card like the gallery thumbnails, so black icons show in a dark theme
+    QImage img = icons::thumbnailTile(THUMB);
+    const QRectF inner = icons::tileInner(THUMB).adjusted(3, 3, -3, -3);
     QSvgRenderer r(svg);
-    QImage img(THUMB, THUMB, QImage::Format_ARGB32_Premultiplied);
-    img.fill(Qt::transparent);
     if (r.isValid()) {
         QSizeF s = r.viewBoxF().size();
         if (s.isEmpty())
             s = QSizeF(1, 1);
-        s.scale(THUMB - 8, THUMB - 8, Qt::KeepAspectRatio);
+        s.scale(inner.size(), Qt::KeepAspectRatio);
         QPainter p(&img);
-        r.render(&p, QRectF((THUMB - s.width()) / 2, (THUMB - s.height()) / 2, s.width(), s.height()));
+        r.render(&p, QRectF(inner.center() - QPointF(s.width() / 2, s.height() / 2), s));
     }
     return QIcon(QPixmap::fromImage(img));
 }
@@ -142,8 +145,7 @@ IconDownloadDialog::IconDownloadDialog(const QString& galleryDir, QWidget* paren
     m_sets->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     for (int c = 1; c < 5; ++c)
         m_sets->horizontalHeader()->setSectionResizeMode(c, QHeaderView::ResizeToContents);
-    connect(m_sets, &QTableWidget::itemSelectionChanged, this,
-            [this] { m_download->setEnabled(!m_jobActive && m_sets->currentRow() >= 0); });
+    connect(m_sets, &QTableWidget::itemSelectionChanged, this, &IconDownloadDialog::updateSetButtons);
     connect(m_sets, &QTableWidget::cellDoubleClicked, this, [this](int r) {
         downloadSet(m_sets->item(r, 0)->data(Qt::UserRole).toString());
     });
@@ -173,6 +175,14 @@ IconDownloadDialog::IconDownloadDialog(const QString& galleryDir, QWidget* paren
             downloadSet(m_sets->item(m_sets->currentRow(), 0)->data(Qt::UserRole).toString());
     });
     setRow->addWidget(m_download);
+    m_remove = new QPushButton(tr("Удалить из галереи"));
+    m_remove->setToolTip(tr("Переместить папку набора в Корзину"));
+    m_remove->setEnabled(false);
+    connect(m_remove, &QPushButton::clicked, this, [this] {
+        if (m_sets->currentRow() >= 0)
+            removeSet(m_sets->item(m_sets->currentRow(), 0)->data(Qt::UserRole).toString(), true);
+    });
+    setRow->addWidget(m_remove);
     tl->addLayout(setRow);
     m_tabs->addTab(setsPage, tr("Наборы целиком"));
     connect(m_tabs, &QTabWidget::currentChanged, this, [this](int i) {
@@ -399,9 +409,42 @@ void IconDownloadDialog::fillSets()
         m_sets->setItem(r, 1, count);
         m_sets->setItem(r, 2, new QTableWidgetItem(c.license.isEmpty() ? c.licenseSpdx : c.license));
         m_sets->setItem(r, 3, new QTableWidgetItem(c.palette ? tr("%1, цветные").arg(c.category) : c.category));
-        m_sets->setItem(r, 4, new QTableWidgetItem(isSetComplete(c) ? tr("да") : QString()));
+        const QString state = isSetComplete(c)                              ? tr("да")
+                              : QFileInfo(setFolder(m_dir, c)).isDir() ? tr("частично")
+                                                                       : QString();
+        m_sets->setItem(r, 4, new QTableWidgetItem(state));
     }
-    m_download->setEnabled(!m_jobActive && m_sets->currentRow() >= 0);
+    updateSetButtons();
+}
+
+void IconDownloadDialog::updateSetButtons()
+{
+    const int r = m_sets->currentRow();
+    const QString prefix = r >= 0 && m_sets->item(r, 0) ? m_sets->item(r, 0)->data(Qt::UserRole).toString() : QString();
+    m_download->setEnabled(!m_jobActive && !prefix.isEmpty());
+    bool present = false;
+    for (const iconify::Collection& c : m_collections)
+        if (c.prefix == prefix)
+            present = QFileInfo(setFolder(m_dir, c)).isDir();
+    // a set being downloaded cannot be removed under the download's feet
+    m_remove->setEnabled(present && !(m_jobActive && m_job.prefix == prefix));
+}
+
+bool IconDownloadDialog::removeSet(const QString& prefix, bool confirm)
+{
+    if (m_jobActive && m_job.prefix == prefix)
+        return false;
+    for (const iconify::Collection& c : m_collections) {
+        if (c.prefix != prefix)
+            continue;
+        if (!ClipartPanel::removeGalleryFolder(this, setFolder(m_dir, c), confirm))
+            return false;
+        m_setStatus->setText(tr("Набор «%1» удалён из галереи (перемещён в Корзину).").arg(c.name));
+        fillSets();
+        emit galleryChanged();
+        return true;
+    }
+    return false;
 }
 
 int IconDownloadDialog::setCount() const { return m_sets->rowCount(); }
@@ -425,7 +468,7 @@ void IconDownloadDialog::startSetDownload(const iconify::Collection& c)
     m_cancelRequested = false;
     m_jobTotal = m_jobDone = m_jobAdded = 0;
     m_batches.clear();
-    m_download->setEnabled(false);
+    updateSetButtons();
     m_cancel->setVisible(true);
     m_progress->setVisible(true);
     m_progress->setRange(0, 0);

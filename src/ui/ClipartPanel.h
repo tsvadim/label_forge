@@ -39,6 +39,13 @@ public:
     void setSection(int index);   // 0 = all sections
     // Opens the icon download window; query goes to its search tab.
     IconDownloadDialog* openDownloads(const QString& query = QString());
+
+    // Removes a folder of the user's gallery: to the recycle bin, or for good
+    // after a second question when there is none. confirm = ask first.
+    static bool removeGalleryFolder(QWidget* parent, const QString& path, bool confirm);
+    // The user's folder behind a tab; built-in tabs have none and cannot be removed.
+    static bool canRemoveCategory(const QString& name);
+    bool removeCategory(const QString& name, bool confirm = true);
     static int thumbnailsRendered();  // for tests: how many thumbnails were drawn so far
 
 signals:
