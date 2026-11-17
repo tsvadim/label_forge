@@ -2,6 +2,8 @@
 #pragma once
 
 #include <QGraphicsView>
+#include <QList>
+#include <QUrl>
 #include <QWidget>
 
 namespace lf {
@@ -40,8 +42,13 @@ signals:
     void zoomChanged(double zoom);
     void nudge(double dx, double dy);
     void deletePressed();
+    // files dropped on the view; pos is the drop point in label millimetres
+    void urlsDropped(const QList<QUrl>& urls, const QPointF& pos);
 
 protected:
+    void dragEnterEvent(QDragEnterEvent* e) override;
+    void dragMoveEvent(QDragMoveEvent* e) override;
+    void dropEvent(QDropEvent* e) override;
     void wheelEvent(QWheelEvent* e) override;
     void keyPressEvent(QKeyEvent* e) override;
     void resizeEvent(QResizeEvent* e) override;

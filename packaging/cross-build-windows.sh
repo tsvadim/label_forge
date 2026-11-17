@@ -27,4 +27,5 @@ cmake --build svgbuild --parallel && cmake --install svgbuild
   -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++ -s" \
   -DCMAKE_CXX_STANDARD_LIBRARIES="-Wl,-Bstatic -lstdc++ -lwinpthread -Wl,-Bdynamic"
 cmake --build app --parallel
+rm -rf app/clipart && cp -r "$SRC/clipart" app/
 echo "Done: $WORK/app/LabelForge.exe"

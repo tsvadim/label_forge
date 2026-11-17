@@ -5,11 +5,13 @@
 #include "core/LabelDocument.h"
 
 #include <QHash>
+#include <QUrl>
 #include <functional>
 #include <QMainWindow>
 
 class QAction;
 class QActionGroup;
+class QDockWidget;
 class QLabel;
 class QListWidget;
 class QMenu;
@@ -21,6 +23,7 @@ class LabelScene;
 class LabelView;
 class PropertyPanel;
 class DataPanel;
+class ClipartPanel;
 class LabelObject;
 
 class MainWindow : public QMainWindow {
@@ -68,6 +71,7 @@ private:
     // editing
     void insertObject(int tool, const QPointF& pos);
     void insertImageFile(const QString& path, const QPointF& pos);
+    void handleDroppedUrls(const QList<QUrl>& urls, const QPointF& pos);  // .lfl opens, images are inserted
     void addObject(std::unique_ptr<LabelObject> obj, const QString& undoText);
     void deleteSelection();
     void copySelection();
@@ -107,6 +111,8 @@ private:
     LabelView* m_view = nullptr;
     PropertyPanel* m_props = nullptr;
     DataPanel* m_dataPanel = nullptr;
+    ClipartPanel* m_clipart = nullptr;
+    QDockWidget* m_clipartDock = nullptr;
     QListWidget* m_objects = nullptr;
     QUndoStack* m_undo = nullptr;
     QActionGroup* m_toolGroup = nullptr;

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "MainWindow.h"
 
+#include "ClipartPanel.h"
 #include "Commands.h"
 #include "DataPanel.h"
 #include "DataSourceDialog.h"
@@ -334,6 +335,11 @@ void MainWindow::createToolbars()
     main->addWidget(stepLabel);
     main->addWidget(step);
     main->addWidget(new QLabel(tr(" мм")));
+    QAction* clip = m_clipartDock->toggleViewAction();
+    clip->setIcon(icons::get(QStringLiteral("clipart")));
+    clip->setToolTip(tr("Показать или скрыть клипарт"));
+    main->addSeparator();
+    main->addAction(clip);
     QToolBar* arrange = addToolBar(tr("Упорядочить"));
     arrange->setObjectName(QStringLiteral("tbArrange"));
     arrange->setIconSize(QSize(20, 20));
@@ -353,6 +359,7 @@ void MainWindow::createToolbars()
     m_viewMenu->addAction(main->toggleViewAction());
     m_viewMenu->addAction(arrange->toggleViewAction());
     m_viewMenu->addAction(tools->toggleViewAction());
+    m_viewMenu->addAction(clip);
 }
 
 void MainWindow::createDocks()
@@ -397,6 +404,18 @@ void MainWindow::createDocks()
     connect(m_dataPanel, &DataPanel::editSourceRequested, this, &MainWindow::editDataSource);
     connect(m_dataPanel, &DataPanel::reloadRequested, this, [this] { loadDataFromConfig(true); });
     connect(m_dataPanel, &DataPanel::inlineTableEdited, this, &MainWindow::onInlineTableEdited);
+
+    // clipart shares the space of the object list, as a second tab
+    m_clipart = new ClipartPanel;
+    m_clipartDock = new QDockWidget(tr("Клипарт"), this);
+    m_clipartDock->setObjectName(QStringLiteral("dockClipart"));
+    m_clipartDock->setWidget(m_clipart);
+    addDockWidget(Qt::RightDockWidgetArea, m_clipartDock);
+    tabifyDockWidget(dObj, m_clipartDock);
+    dObj->raise();
+    connect(m_clipart, &ClipartPanel::insertRequested, this,
+            [this](const QString& path) { insertImageFile(path, QPointF(2, 2)); });
+    connect(m_view, &LabelView::urlsDropped, this, &MainWindow::handleDroppedUrls);
     resizeDocks({dData}, {170}, Qt::Vertical);
     resizeDocks({dProps}, {300}, Qt::Horizontal);
 }
@@ -659,7 +678,12 @@ void MainWindow::dragEnterEvent(QDragEnterEvent* e)
 
 void MainWindow::dropEvent(QDropEvent* e)
 {
-    for (const QUrl& u : e->mimeData()->urls()) {
+    handleDroppedUrls(e->mimeData()->urls(), QPointF(2, 2));
+}
+
+void MainWindow::handleDroppedUrls(const QList<QUrl>& urls, const QPointF& pos)
+{
+    for (const QUrl& u : urls) {
         const QString path = u.toLocalFile();
         if (path.endsWith(QStringLiteral(".lfl"), Qt::CaseInsensitive)) {
             if (maybeSave())
@@ -669,7 +693,10 @@ void MainWindow::dropEvent(QDropEvent* e)
         const QString suffix = QFileInfo(path).suffix().toLower();
         if (suffix == QLatin1String("svg") || suffix == QLatin1String("svgz") ||
             !QImageReader::imageFormat(path).isEmpty()) {
-            insertImageFile(path, QPointF(2, 2));
+            // keep at least a 5 mm corner of the image on the label
+            const QPointF at(std::clamp(pos.x(), 0.0, std::max(0.0, m_doc.label.width - 5)),
+                             std::clamp(pos.y(), 0.0, std::max(0.0, m_doc.label.height - 5)));
+            insertImageFile(path, at);
             return;
         }
     }

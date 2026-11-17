@@ -4,6 +4,7 @@
 #include "core/LabelDocument.h"
 #include "data/DataLoader.h"
 #include "templates/TemplateLibrary.h"
+#include "ui/ClipartPanel.h"
 #include "ui/DataSourceDialog.h"
 #include "ui/LabelScene.h"
 #include "ui/LabelView.h"
@@ -18,7 +19,9 @@
 
 #include <QApplication>
 #include <QDir>
+#include <QDockWidget>
 #include <QDropEvent>
+#include <QListWidget>
 #include <QFile>
 #include <QMimeData>
 #include <QMouseEvent>
@@ -240,6 +243,69 @@ int main(int argc, char** argv)
             shot(panel, out, QStringLiteral("06_image_props_bottom"));
         }
         undo->undo();
+        settle();
+    }
+
+    // clipart panel: built-in set, search, double-click insert, drop under the cursor
+    {
+        auto* clip = w.findChild<ClipartPanel*>();
+        CHECK(clip != nullptr, "clipart panel present");
+        auto* dock = qobject_cast<QDockWidget*>(clip->parentWidget());
+        if (dock) {
+            dock->show();
+            dock->raise();
+        }
+        settle();
+        const QStringList cats = clip->categories();
+        std::printf("clipart: %d items, categories: %s\n", clip->visibleCount(), qPrintable(cats.join(QStringLiteral(", "))));
+        CHECK(clip->visibleCount() >= 50, "clipart: built-in set listed");
+        CHECK(cats.contains(QStringLiteral("Обращение с грузом")) && cats.contains(QStringLiteral("Опасность (GHS)")) &&
+                  cats.contains(QStringLiteral("Переработка")),
+              "clipart: subfolders become categories");
+        shot(&w, out, QStringLiteral("07_clipart"));
+        clip->setCategory(int(cats.indexOf(QStringLiteral("Опасность (GHS)"))) + 1);
+        settle();
+        CHECK(clip->visibleCount() == 9, "clipart: category tab filters");
+        shot(clip, out, QStringLiteral("08_clipart_ghs"));
+        clip->setCategory(0);
+        clip->setFilter(QStringLiteral("хрупк"));
+        settle();
+        CHECK(clip->visibleCount() == 1, "clipart: search is case-insensitive");
+
+        auto* list = clip->findChild<QListWidget*>();
+        const int n = int(scene->document()->objects.size());
+        const QPoint ip = list->visualItemRect(list->item(0)).center();
+        // the same event sequence a real double click produces
+        QWidget* lvp = list->viewport();
+        mouse(lvp, QEvent::MouseButtonPress, ip, Qt::LeftButton);
+        mouse(lvp, QEvent::MouseButtonRelease, ip, Qt::NoButton);
+        mouse(lvp, QEvent::MouseButtonDblClick, ip, Qt::LeftButton);
+        mouse(lvp, QEvent::MouseButtonRelease, ip, Qt::NoButton);
+        settle();
+        CHECK(int(scene->document()->objects.size()) == n + 1, "clipart: double click inserts");
+        auto* im = dynamic_cast<ImageObject*>(scene->document()->objects.back().get());
+        CHECK(im && !im->svgData.isEmpty() && im->pathTemplate.isEmpty(), "clipart: inserted picture is embedded");
+        undo->undo();
+        settle();
+
+        // drag data of an item is a file URL; drop it on the label at (10, 6) mm
+        std::unique_ptr<QMimeData> mime(list->model()->mimeData({list->indexFromItem(list->item(0))}));
+        CHECK(mime && mime->hasUrls() && mime->urls().value(0).isLocalFile(), "clipart: drags as a file URL");
+        const QPoint at = view->viewport()->mapTo(&w, view->mapFromScene(QPointF(10, 6)));
+        QDragEnterEvent enter(at, Qt::CopyAction, mime.get(), Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(w.windowHandle(), &enter);
+        QDragMoveEvent move(at, Qt::CopyAction, mime.get(), Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(w.windowHandle(), &move);
+        QDropEvent drop(QPointF(at), Qt::CopyAction, mime.get(), Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(w.windowHandle(), &drop);
+        settle();
+        CHECK(int(scene->document()->objects.size()) == n + 1, "clipart: drop on the label inserts");
+        im = dynamic_cast<ImageObject*>(scene->document()->objects.back().get());
+        if (im)
+            std::printf("clipart drop at %.2f, %.2f mm\n", im->x, im->y);
+        CHECK(im && std::abs(im->x - 10) < 0.5 && std::abs(im->y - 6) < 0.5, "clipart: dropped where the mouse is");
+        undo->undo();
+        clip->setFilter(QString());
         settle();
     }
 

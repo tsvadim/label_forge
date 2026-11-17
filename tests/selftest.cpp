@@ -13,6 +13,8 @@
 #include <QApplication>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
+#include <QPainter>
 #include <QSvgRenderer>
 #include <QTextStream>
 #include <cstdio>
@@ -193,6 +195,60 @@ static void testImageObject(const QDir& out)
     c.save(out.filePath(QStringLiteral("image_crop.png")));
 }
 
+// Every shipped clipart file must load, survive recolouring and actually draw
+// something; the contact sheet clipart_sheet.png is for eyeballing the set.
+static void testClipart(const QDir& out)
+{
+    const QDir root(QCoreApplication::applicationDirPath() + QStringLiteral("/clipart"));
+    CHECK(root.exists(), "clipart: folder next to the executable");
+    QStringList files;
+    for (const QString& sub : root.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name))
+        for (const QString& f : QDir(root.filePath(sub)).entryList({QStringLiteral("*.svg")}, QDir::Files, QDir::Name))
+            files << root.filePath(sub + QLatin1Char('/') + f);
+    CHECK(files.size() >= 50, "clipart: starter set present");
+    const int cell = 72, cols = 10;
+    QImage sheet(cols * cell, int((files.size() + cols - 1) / cols) * cell * 2, QImage::Format_ARGB32);
+    sheet.fill(Qt::white);
+    QPainter sp(&sheet);
+    const QColor tint(200, 0, 0);
+    for (int i = 0; i < files.size(); ++i) {
+        QFile f(files.at(i));
+        f.open(QIODevice::ReadOnly);
+        const QByteArray svg = f.readAll();
+        const QByteArray name = QFileInfo(files.at(i)).fileName().toUtf8();
+        const QByteArray recoloured = recolorSvg(svg, tint);
+        QSvgRenderer plain(svg), red(recoloured);
+        if (!plain.isValid() || !red.isValid()) {
+            CHECK(false, ("clipart: invalid svg " + name).constData());
+            continue;
+        }
+        auto draw = [cell](QSvgRenderer& r) {
+            QImage img(cell - 8, cell - 8, QImage::Format_ARGB32);
+            img.fill(Qt::transparent);
+            QPainter p(&img);
+            QSizeF s = r.viewBoxF().size();
+            s.scale(img.width(), img.height(), Qt::KeepAspectRatio);
+            r.render(&p, QRectF((img.width() - s.width()) / 2, (img.height() - s.height()) / 2, s.width(), s.height()));
+            return img;
+        };
+        const QImage a = draw(plain), b = draw(red);
+        int inked = 0, tinted = 0;
+        for (int y = 0; y < b.height(); ++y)
+            for (int x = 0; x < b.width(); ++x) {
+                const QRgb pa = a.pixel(x, y), pb = b.pixel(x, y);
+                inked += qAlpha(pa) > 128 && qGray(pa) < 200;
+                tinted += qAlpha(pb) > 200 && qRed(pb) > 150 && qGreen(pb) < 60 && qBlue(pb) < 60;
+            }
+        CHECK(inked > 50, ("clipart: draws something " + name).constData());
+        CHECK(tinted > 50, ("clipart: recolours " + name).constData());
+        const int cx = (i % cols) * cell + 4, cy = (i / cols) * cell * 2 + 4;
+        sp.drawImage(cx, cy, a);
+        sp.drawImage(cx, cy + cell, b);
+    }
+    sp.end();
+    sheet.save(out.filePath(QStringLiteral("clipart_sheet.png")));
+}
+
 static void testXlsx(const QString& path, QTextStream& log)
 {
     QString err;
@@ -277,6 +333,7 @@ int main(int argc, char** argv)
     if (argc > 2)
         testXlsx(QString::fromLocal8Bit(argv[2]), log);
     testImageObject(out);
+    testClipart(out);
 
     QFile mf(out.filePath(QStringLiteral("barcodes.tsv")));
     mf.open(QIODevice::WriteOnly | QIODevice::Truncate);

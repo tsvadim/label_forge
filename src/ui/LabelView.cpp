@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "LabelView.h"
 
+#include <QDropEvent>
 #include <QKeyEvent>
+#include <QMimeData>
 #include <QPainter>
 #include <QScreen>
 #include <QScrollBar>
@@ -99,6 +101,7 @@ LabelView::LabelView(QWidget* parent) : QGraphicsView(parent)
     setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
     setMouseTracking(true);
     setFocusPolicy(Qt::StrongFocus);
+    setAcceptDrops(true);
     setViewportMargins(RULER, RULER, 0, 0);
     m_hRuler = new Ruler(Qt::Horizontal, this);
     m_vRuler = new Ruler(Qt::Vertical, this);
@@ -140,6 +143,34 @@ void LabelView::setCursorPos(const QPointF& mm)
 {
     m_hRuler->setCursorPos(mm.x());
     m_vRuler->setCursorPos(mm.y());
+}
+
+// File drops are handled here rather than by the scene, so they land where the
+// mouse is; everything else (no URLs) goes the normal QGraphicsView way.
+void LabelView::dragEnterEvent(QDragEnterEvent* e)
+{
+    if (e->mimeData()->hasUrls())
+        e->acceptProposedAction();
+    else
+        QGraphicsView::dragEnterEvent(e);
+}
+
+void LabelView::dragMoveEvent(QDragMoveEvent* e)
+{
+    if (e->mimeData()->hasUrls())
+        e->acceptProposedAction();
+    else
+        QGraphicsView::dragMoveEvent(e);
+}
+
+void LabelView::dropEvent(QDropEvent* e)
+{
+    if (!e->mimeData()->hasUrls()) {
+        QGraphicsView::dropEvent(e);
+        return;
+    }
+    e->acceptProposedAction();
+    emit urlsDropped(e->mimeData()->urls(), mapToScene(e->position().toPoint()));
 }
 
 void LabelView::wheelEvent(QWheelEvent* e)

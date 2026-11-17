@@ -79,6 +79,8 @@ if(LABELFORGE_BUILD_APP)
         src/ui/PropertyPanel.cpp
         src/ui/DataPanel.h
         src/ui/DataPanel.cpp
+        src/ui/ClipartPanel.h
+        src/ui/ClipartPanel.cpp
         src/ui/DataSourceDialog.h
         src/ui/DataSourceDialog.cpp
         src/ui/SheetLayoutDialog.h
@@ -105,7 +107,14 @@ if(LABELFORGE_BUILD_APP)
     target_link_libraries(LabelForge PRIVATE labelforge_ui)
 
     install(TARGETS LabelForge RUNTIME DESTINATION .)
+    install(DIRECTORY clipart DESTINATION .)
 endif()
+
+# Clipart is looked up next to the executable: keep a copy in the build dir
+# so the app and the tests run from there see it.
+add_custom_target(labelforge_clipart ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/clipart ${CMAKE_BINARY_DIR}/clipart
+    COMMENT "Copying clipart")
 
 # ---------------------------------------------------------------- tests
 if(LABELFORGE_BUILD_TESTS)

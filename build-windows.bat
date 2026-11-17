@@ -16,6 +16,7 @@ windeployqt --release --compiler-runtime --no-opengl-sw dist\LabelForge\LabelFor
 copy LICENSE dist\LabelForge\ >nul
 copy README.md dist\LabelForge\ >nul
 xcopy /e /i /q examples dist\LabelForge\examples >nul
+xcopy /e /i /q clipart dist\LabelForge\clipart >nul
 
 echo.
 echo Done: dist\LabelForge\LabelForge.exe

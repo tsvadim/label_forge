@@ -5,6 +5,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
+#include <cmath>
 
 namespace lf::icons {
 
@@ -228,6 +229,30 @@ QPixmap paint(const QString& name, int s)
         p.setBrush(Qt::white);
         p.drawRoundedRect(QRectF(3, 7, 26, 18), 4, 4);
         drawBars(p, QRectF(8, 11, 16, 10));
+    } else if (name == QLatin1String("clipart")) {
+        // a star and a heart: ready-made pictures
+        QPainterPath star;
+        for (int i = 0; i < 10; ++i) {
+            const double pi = 3.14159265358979;
+            const double a = -pi / 2 + i * pi / 5;
+            const double r = i % 2 ? 4.2 : 9.5;
+            const QPointF pt(11 + r * std::cos(a), 13 + r * std::sin(a));
+            if (i == 0)
+                star.moveTo(pt);
+            else
+                star.lineTo(pt);
+        }
+        star.closeSubpath();
+        p.setBrush(ACCENT);
+        p.drawPath(star);
+        QPainterPath heart;
+        heart.moveTo(23, 28);
+        heart.cubicTo(13, 21, 16, 13, 20.5, 15);
+        heart.cubicTo(22, 15.7, 23, 17, 23, 17);
+        heart.cubicTo(23, 17, 24, 15.7, 25.5, 15);
+        heart.cubicTo(30, 13, 33, 21, 23, 28);
+        p.setBrush(INK);
+        p.drawPath(heart);
     }
     p.end();
     return pm;
