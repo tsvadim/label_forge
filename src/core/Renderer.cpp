@@ -18,7 +18,7 @@ void renderObject(QPainter* p, const LabelObject& obj, const RenderContext& ctx)
         p->rotate(obj.rotation);
         p->translate(-obj.w / 2, -obj.h / 2);
     }
-    obj.paint(p, ctx);
+    obj.draw(p, ctx);
     p->restore();
 }
 

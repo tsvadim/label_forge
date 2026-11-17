@@ -31,6 +31,8 @@ add_library(labelforge_core STATIC
     src/core/TextLayout.cpp
     src/core/ImageEffects.h
     src/core/ImageEffects.cpp
+    src/core/ShapePaths.h
+    src/core/ShapePaths.cpp
     src/core/LabelObject.h
     src/core/LabelObject.cpp
     src/core/DataSource.h

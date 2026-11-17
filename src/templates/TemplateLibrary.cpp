@@ -2,6 +2,7 @@
 #include "TemplateLibrary.h"
 
 #include "core/LabelDocument.h"
+#include "core/ShapePaths.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -63,6 +64,7 @@ RectObject* rect(LabelDocument& d, double x, double y, double w, double h, doubl
     r->strokeWidth = stroke;
     r->radius = radius;
     r->fill = fill;
+    r->fillType = fill.alpha() > 0 ? shapes::FillSolid : shapes::FillNone;
     RectObject* raw = r.get();
     d.objects.push_back(std::move(r));
     return raw;

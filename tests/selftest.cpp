@@ -5,6 +5,7 @@
 #include "core/ImageEffects.h"
 #include "core/LabelDocument.h"
 #include "core/Renderer.h"
+#include "core/ShapePaths.h"
 #include "data/DataLoader.h"
 #include "print/PrintJob.h"
 #include "print/ThermalExport.h"
@@ -195,6 +196,267 @@ static void testImageObject(const QDir& out)
     c.save(out.filePath(QStringLiteral("image_crop.png")));
 }
 
+static bool dark(const QImage& img, double xmm, double ymm, double pxPerMm = 10)
+{
+    return qGray(img.pixel(int(xmm * pxPerMm), int(ymm * pxPerMm))) < 100;
+}
+
+static bool light(const QImage& img, double xmm, double ymm, double pxPerMm = 10)
+{
+    return qGray(img.pixel(int(xmm * pxPerMm), int(ymm * pxPerMm))) > 200;
+}
+
+// Shapes, frames, fills, shadows and line caps. Rendered at 254 dpi = 10 px/mm.
+static void testShapes(const QDir& out)
+{
+    RenderContext ctx;
+    auto docWith = [](std::unique_ptr<LabelObject> o, double w = 20, double h = 20) {
+        auto d = std::make_unique<LabelDocument>();
+        d->label.width = w;
+        d->label.height = h;
+        d->objects.push_back(std::move(o));
+        return d;
+    };
+
+    // JSON: every new field survives, old files keep their meaning
+    {
+        PolyShapeObject s;
+        s.setKind(shapes::Callout);
+        s.param1 = 70;
+        s.param2 = 30;
+        s.frame = shapes::FrameThickThin;
+        s.frameGap = 0.8;
+        s.strokeStyle = 2;
+        s.fillType = shapes::FillPattern;
+        s.fill = QColor(1, 2, 3);
+        s.fill2 = QColor(4, 5, 6);
+        s.pattern = shapes::PatDots;
+        s.patternSpacing = 2;
+        s.patternWidth = 0.5;
+        s.shadow = true;
+        s.shadowDx = -2;
+        s.shadowDy = 1.5;
+        s.shadowBlur = 0.7;
+        s.shadowOpacity = 0.4;
+        s.shadowColor = QColor(10, 20, 30);
+        auto c = LabelObject::fromJsonAny(s.toJson());
+        auto* p = dynamic_cast<PolyShapeObject*>(c.get());
+        CHECK(p && p->kind == shapes::Callout && p->param1 == 70 && p->param2 == 30 &&
+                  p->frame == shapes::FrameThickThin && p->frameGap == 0.8 && p->strokeStyle == 2 &&
+                  p->fillType == shapes::FillPattern && p->fill == QColor(1, 2, 3) && p->fill2 == QColor(4, 5, 6) &&
+                  p->pattern == shapes::PatDots && p->patternSpacing == 2 && p->patternWidth == 0.5 && p->shadow &&
+                  p->shadowDx == -2 && p->shadowDy == 1.5 && p->shadowBlur == 0.7 && p->shadowOpacity == 0.4 &&
+                  p->shadowColor == QColor(10, 20, 30),
+              "shape: json round trip");
+        CHECK(c && c->toJson() == s.toJson(), "shape: json stable");
+        LineObject l;
+        l.startCap = LineObject::CapDot;
+        l.endCap = LineObject::CapTriangle;
+        l.capSize = 7;
+        auto lc = LabelObject::fromJsonAny(l.toJson());
+        auto* lp = dynamic_cast<LineObject*>(lc.get());
+        CHECK(lp && lp->startCap == LineObject::CapDot && lp->endCap == LineObject::CapTriangle && lp->capSize == 7,
+              "line caps: json round trip");
+
+        QJsonObject old;
+        old[QStringLiteral("type")] = QStringLiteral("rect");
+        old[QStringLiteral("fill")] = QStringLiteral("#ffff0000");
+        auto o1 = LabelObject::fromJsonAny(old);
+        old[QStringLiteral("fill")] = QStringLiteral("#00000000");
+        auto o2 = LabelObject::fromJsonAny(old);
+        auto* r1 = dynamic_cast<RectObject*>(o1.get());
+        auto* r2 = dynamic_cast<RectObject*>(o2.get());
+        CHECK(r1 && r1->fillType == shapes::FillSolid && r2 && r2->fillType == shapes::FillNone && !r1->shadow &&
+                  r1->frame == shapes::FrameSingle,
+              "shape: old files keep their fill");
+    }
+
+    // every kind draws something inside its box and exports to PDF
+    {
+        LabelDocument all;
+        all.label.width = 4 * 32;
+        all.label.height = 4 * 22;
+        for (int k = 0; k < shapes::KindCount; ++k) {
+            auto s = std::make_unique<PolyShapeObject>();
+            s->setKind(k);
+            s->w = 30;
+            s->h = 20;
+            s->fillType = shapes::FillSolid;
+            s->fill = Qt::black;
+            const QImage img = renderLabelImage(*docWith(s->clone(), 30, 20), ctx, 100, false);
+            int ink = 0;
+            for (int y = 0; y < img.height(); ++y)
+                for (int x = 0; x < img.width(); ++x)
+                    ink += qGray(img.pixel(x, y)) < 128;
+            const double share = double(ink) / (img.width() * img.height());
+            CHECK(share > 0.15 && share < 0.98, ("shape draws: " + shapes::kindId(k).toUtf8()).constData());
+            s->x = (k % 4) * 32 + 1;
+            s->y = (k / 4) * 22 + 1;
+            // vary the effects so the PDF shows them all
+            s->fillType = k % 4 == 0 ? shapes::FillLinear : k % 4 == 1 ? shapes::FillRadial
+                                                          : k % 4 == 2 ? shapes::FillPattern : shapes::FillSolid;
+            s->fill = QColor(30, 90, 200);
+            s->fill2 = QColor(255, 230, 120);
+            s->frame = k % 3;
+            s->strokeWidth = 0.6;
+            s->shadow = k % 2 == 0;
+            s->shadowBlur = k % 4 == 0 ? 1.0 : 0;
+            all.objects.push_back(std::move(s));
+        }
+        // curved outlines with double frames must stay smooth
+        auto e = std::make_unique<EllipseObject>();
+        e->x = 33;
+        e->y = 67;
+        e->w = 30;
+        e->h = 20;
+        e->strokeWidth = 0.6;
+        e->frame = shapes::FrameDouble;
+        all.objects.push_back(std::move(e));
+        auto rr = std::make_unique<RectObject>();
+        rr->x = 65;
+        rr->y = 67;
+        rr->w = 30;
+        rr->h = 20;
+        rr->radius = 5;
+        rr->strokeWidth = 0.8;
+        rr->frame = shapes::FrameThickThin;
+        all.objects.push_back(std::move(rr));
+        auto ln = std::make_unique<LineObject>();
+        ln->x = 97;
+        ln->y = 70;
+        ln->w = 28;
+        ln->h = 14;
+        ln->width = 0.5;
+        ln->startCap = LineObject::CapDot;
+        ln->endCap = LineObject::CapArrow;
+        auto ln2 = ln->clone();
+        static_cast<LineObject*>(ln2.get())->startCap = LineObject::CapBar;
+        static_cast<LineObject*>(ln2.get())->endCap = LineObject::CapTriangle;
+        ln2->y = 76;
+        all.objects.push_back(std::move(ln));
+        all.objects.push_back(std::move(ln2));
+        QString err;
+        const DataTable noData;
+        PrintJob job(all, noData, all.print);
+        CHECK(job.exportPdf(out.filePath(QStringLiteral("shapes.pdf")), &err), "shapes: pdf export");
+        renderLabelImage(all, ctx, 200, false).save(out.filePath(QStringLiteral("shapes.png")));
+    }
+
+    // double frame: two lines with a white gap, nothing in the middle
+    {
+        auto r = std::make_unique<RectObject>();
+        r->w = r->h = 20;
+        r->strokeWidth = 1;
+        r->frame = shapes::FrameDouble;
+        r->frameGap = 1;
+        const QImage img = renderLabelImage(*docWith(std::move(r)), ctx, 254, false);
+        CHECK(dark(img, 0.5, 10) && light(img, 1.5, 10) && dark(img, 2.5, 10) && light(img, 10, 10),
+              "double frame: line, gap, line");
+    }
+
+    // gradients: dark-to-light on screen, a halftone on a thermal printer
+    {
+        auto r = std::make_unique<RectObject>();
+        r->w = r->h = 20;
+        r->strokeWidth = 0;
+        r->fillType = shapes::FillLinear;
+        r->fill = Qt::black;
+        r->fill2 = Qt::white;
+        RectObject* rp = r.get();
+        auto doc = docWith(std::move(r));
+        const QImage img = renderLabelImage(*doc, ctx, 254, false);
+        CHECK(dark(img, 1, 10) && light(img, 19, 10), "linear gradient: left dark, right light");
+        const double half = blackShare(renderLabelImage(*doc, ctx, 203, true));
+        CHECK(half > 0.3 && half < 0.7, "linear gradient: dithered on thermal");
+        rp->fillType = shapes::FillSolid;
+        rp->fill = QColor(0x77, 0x77, 0x77);
+        CHECK(blackShare(renderLabelImage(*doc, ctx, 203, true)) > 0.95, "solid grey: threshold on thermal");
+        rp->fillType = shapes::FillRadial;
+        rp->fill = Qt::black;
+        const QImage rad = renderLabelImage(*doc, ctx, 254, false);
+        CHECK(dark(rad, 10, 10) && !dark(rad, 0.5, 0.5), "radial gradient: dark centre");
+    }
+
+    // hatching: both colours inside the shape
+    {
+        auto r = std::make_unique<RectObject>();
+        r->w = r->h = 20;
+        r->strokeWidth = 0;
+        r->fillType = shapes::FillPattern;
+        r->fill = Qt::black;
+        r->fill2 = Qt::white;
+        r->pattern = shapes::PatCross;
+        r->patternSpacing = 2;
+        r->patternWidth = 0.4;
+        const QImage img = renderLabelImage(*docWith(std::move(r)), ctx, 254, false);
+        int ink = 0, paper = 0;
+        for (int y = 20; y < 180; ++y)
+            for (int x = 20; x < 180; ++x)
+                (qGray(img.pixel(x, y)) < 100 ? ink : paper) += qGray(img.pixel(x, y)) < 100 || qGray(img.pixel(x, y)) > 200;
+        CHECK(ink > 1000 && paper > 1000, "pattern: lines and gaps");
+    }
+
+    // shadows: sharp and soft, for a shape and for an image
+    {
+        auto r = std::make_unique<RectObject>();
+        r->x = r->y = 2;
+        r->w = r->h = 10;
+        r->strokeWidth = 0;
+        r->fillType = shapes::FillSolid;
+        r->fill = Qt::white;
+        r->shadow = true;
+        r->shadowDx = r->shadowDy = 3;
+        r->shadowOpacity = 1;
+        RectObject* rp = r.get();
+        auto doc = docWith(std::move(r));
+        QImage img = renderLabelImage(*doc, ctx, 254, false);
+        CHECK(dark(img, 14, 14) && light(img, 5, 5) && light(img, 17, 17), "sharp shadow: offset under the shape");
+        rp->shadowBlur = 2;
+        img = renderLabelImage(*doc, ctx, 254, false);
+        const int edge = qGray(img.pixel(150, 100));  // the shadow's right edge at x = 15 mm
+        CHECK(edge > 40 && edge < 220 && dark(img, 10, 10.5 + 3), "soft shadow: soft edge");
+        const double soft = blackShare(renderLabelImage(*doc, ctx, 203, true));
+        CHECK(soft > 0.05 && soft < 0.6, "soft shadow: dithered on thermal");
+
+        auto im = std::make_unique<ImageObject>();
+        QImage paper(10, 10, QImage::Format_ARGB32);  // opaque white picture
+        paper.fill(Qt::white);
+        im->setEmbedded(paper);
+        im->x = im->y = 2;
+        im->w = im->h = 10;
+        im->shadow = true;
+        im->shadowDx = im->shadowDy = 3;
+        im->shadowOpacity = 1;
+        img = renderLabelImage(*docWith(std::move(im)), ctx, 254, false);
+        CHECK(dark(img, 14, 14) && light(img, 5, 5), "image shadow");
+
+        auto t = std::make_unique<TextObject>();
+        t->text = QStringLiteral("█");
+        t->shadow = true;
+        CHECK(!t->silhouette(ctx).isEmpty(), "text shadow: vector outline");
+        BarcodeObject bc;
+        bc.shadow = true;
+        CHECK(bc.shadowReach() == 0, "barcode: no shadow");
+    }
+
+    // line caps: a triangle head is wider than the line
+    {
+        auto l = std::make_unique<LineObject>();
+        l->w = 30;
+        l->h = 6;
+        l->width = 0.5;
+        l->endCap = LineObject::CapTriangle;
+        l->capSize = 6;
+        LineObject* lp = l.get();
+        auto doc = docWith(std::move(l), 30, 6);
+        QImage img = renderLabelImage(*doc, ctx, 254, false);
+        CHECK(dark(img, 29, 3) && dark(img, 28, 2.2) && !dark(img, 15, 2.2), "line: triangle head");
+        lp->endCap = LineObject::CapNone;
+        img = renderLabelImage(*doc, ctx, 254, false);
+        CHECK(!dark(img, 28, 2.2) && dark(img, 29, 3), "line: plain end");
+    }
+}
+
 // Every shipped clipart file must load, survive recolouring and actually draw
 // something; the contact sheet clipart_sheet.png is for eyeballing the set.
 static void testClipart(const QDir& out)
@@ -334,6 +596,7 @@ int main(int argc, char** argv)
         testXlsx(QString::fromLocal8Bit(argv[2]), log);
     testImageObject(out);
     testClipart(out);
+    testShapes(out);
 
     QFile mf(out.filePath(QStringLiteral("barcodes.tsv")));
     mf.open(QIODevice::WriteOnly | QIODevice::Truncate);

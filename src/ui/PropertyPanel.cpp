@@ -6,6 +6,7 @@
 #include "core/LabelDocument.h"
 #include "core/LabelObject.h"
 #include "core/RenderContext.h"
+#include "core/ShapePaths.h"
 #include "print/SheetLayout.h"
 
 #include <QCheckBox>
@@ -430,6 +431,7 @@ void PropertyPanel::buildShape(QFormLayout* f, ShapeObject* s, bool isRect)
               }));
     f->addRow(tr("Заливка:"), new ColorButton(s->fill, true, [this, s](const QColor& c) {
                   s->fill = c;
+                  s->fillType = c.alpha() > 0 ? shapes::FillSolid : shapes::FillNone;
                   edited(s, QStringLiteral("fill"));
               }));
     if (isRect) {

@@ -31,6 +31,10 @@ QImage ditherToMono(const QImage& src);
 // <style> blocks) to the given colour, leaving "none", url(...) and near-white
 // colours alone, so a one-colour icon can be recoloured and stay vector.
 // Returns the input unchanged if it is not parseable XML (e.g. gzipped .svgz).
+// Approximate gaussian blur of the alpha channel (three box passes each way);
+// every pixel gets `color` with the blurred coverage. Returns Format_ARGB32.
+QImage blurSilhouette(const QImage& src, int radiusPx, const QColor& color);
+
 QByteArray recolorSvg(const QByteArray& svg, const QColor& color);
 
 bool isSvgData(const QByteArray& data);

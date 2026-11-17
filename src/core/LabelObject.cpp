@@ -3,6 +3,7 @@
 
 #include "ImageEffects.h"
 #include "RenderContext.h"
+#include "ShapePaths.h"
 #include "TextLayout.h"
 #include "barcode/Barcode.h"
 
@@ -12,7 +13,9 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QImageReader>
+#include <QJsonDocument>
 #include <QPainter>
+#include <QPainterPathStroker>
 #include <QSvgRenderer>
 #include <algorithm>
 #include <cmath>
@@ -90,6 +93,16 @@ QJsonObject LabelObject::toJson() const
         o[QStringLiteral("locked")] = true;
     if (!printable)
         o[QStringLiteral("printable")] = false;
+    if (shadow) {
+        QJsonObject s;
+        s[QStringLiteral("dx")] = shadowDx;
+        s[QStringLiteral("dy")] = shadowDy;
+        s[QStringLiteral("color")] = colorToString(shadowColor);
+        s[QStringLiteral("opacity")] = shadowOpacity;
+        if (shadowBlur > 0)
+            s[QStringLiteral("blur")] = shadowBlur;
+        o[QStringLiteral("shadow")] = s;
+    }
     return o;
 }
 
@@ -103,6 +116,62 @@ void LabelObject::fromJson(const QJsonObject& o)
     rotation = num(o, "rotation", 0);
     locked = flag(o, "locked", false);
     printable = flag(o, "printable", true);
+    const QJsonValue sv = o.value(QLatin1String("shadow"));
+    shadow = sv.isObject();
+    const QJsonObject s = sv.toObject();
+    shadowDx = std::clamp(num(s, "dx", 1.0), -50.0, 50.0);
+    shadowDy = std::clamp(num(s, "dy", 1.0), -50.0, 50.0);
+    shadowColor = colorFrom(s.value(QLatin1String("color")), Qt::black);
+    shadowOpacity = std::clamp(num(s, "opacity", 0.6), 0.0, 1.0);
+    shadowBlur = std::clamp(num(s, "blur", 0), 0.0, 20.0);
+}
+
+void LabelObject::draw(QPainter* p, const RenderContext& ctx) const
+{
+    if (shadow && supportsShadow() && shadowOpacity > 0 && shadowColor.alpha() > 0)
+        paintShadow(p, ctx);
+    paint(p, ctx);
+}
+
+QPainterPath LabelObject::silhouette(const RenderContext&) const { return QPainterPath(); }
+
+double LabelObject::shadowReach() const
+{
+    if (!shadow || !supportsShadow())
+        return 0;
+    return std::max(std::abs(shadowDx), std::abs(shadowDy)) + shadowBlur * 1.5 + 0.5;
+}
+
+void LabelObject::paintShadow(QPainter* p, const RenderContext& ctx) const
+{
+    QColor c = shadowColor;
+    c.setAlphaF(float(c.alphaF() * shadowOpacity));
+    const QPainterPath sil = silhouette(ctx);
+    if (shadowBlur <= 0 && !sil.isEmpty()) {
+        p->fillPath(sil.translated(shadowDx, shadowDy), c);  // sharp: stays vector
+        return;
+    }
+    // soft shadow (or an object without a vector outline): a blurred raster
+    const double dpi = ctx.deviceDpi > 0 ? ctx.deviceDpi : 300;
+    const double pad = shadowBlur * 1.5 + 0.5;
+    const QRectF area = (sil.isEmpty() ? QRectF(0, 0, w, h) : sil.boundingRect()).adjusted(-pad, -pad, pad, pad);
+    QImage img = shapes::rasterize(area, dpi, [&](QPainter* q) {
+        if (!sil.isEmpty()) {
+            q->fillPath(sil, Qt::black);
+        } else {
+            RenderContext plain = ctx;
+            plain.monoDither = false;
+            paint(q, plain);
+        }
+    });
+    img = blurSilhouette(img, int(std::lround(mmToDots(shadowBlur, dpi))), c);
+    p->save();
+    if (ctx.monoDither) {
+        img = shapes::ditherOverWhite(img);
+        p->setRenderHint(QPainter::SmoothPixmapTransform, false);
+    }
+    p->drawImage(area.translated(shadowDx, shadowDy), img);
+    p->restore();
 }
 
 std::unique_ptr<LabelObject> LabelObject::clone() const
@@ -121,6 +190,8 @@ std::unique_ptr<LabelObject> LabelObject::create(const QString& t)
         return std::make_unique<RectObject>();
     if (t == QLatin1String("ellipse"))
         return std::make_unique<EllipseObject>();
+    if (t == QLatin1String("shape"))
+        return std::make_unique<PolyShapeObject>();
     if (t == QLatin1String("line"))
         return std::make_unique<LineObject>();
     if (t == QLatin1String("image"))
@@ -148,9 +219,31 @@ void TextObject::paint(QPainter* p, const RenderContext& ctx) const
 {
     if (fill.alpha() > 0)
         p->fillRect(QRectF(0, 0, w, h), fill);
-    const QString s = expandTemplate(text, ctx);
-    if (s.isEmpty())
+    const QPainterPath& path = textPath(ctx);
+    if (path.isEmpty())
         return;
+    p->setPen(Qt::NoPen);
+    p->setBrush(color);
+    p->drawPath(path);
+}
+
+QPainterPath TextObject::silhouette(const RenderContext& ctx) const
+{
+    QPainterPath s = textPath(ctx);
+    if (fill.alpha() > 0) {
+        s = QPainterPath();
+        s.addRect(QRectF(0, 0, w, h));
+    }
+    return s;
+}
+
+const QPainterPath& TextObject::textPath(const RenderContext& ctx) const
+{
+    const QString s = expandTemplate(text, ctx);
+    if (s.isEmpty()) {
+        static const QPainterPath empty;
+        return empty;
+    }
     const QString key = s + QLatin1Char('\x1f') + fontFamily +
                         QStringLiteral("|%1|%2%3%4|%5|%6|%7%8|%9|%10x%11")
                             .arg(fontSize)
@@ -179,9 +272,7 @@ void TextObject::paint(QPainter* p, const RenderContext& ctx) const
         m_cachePath = layoutText(s, st, w, h);
         m_cacheKey = key;
     }
-    p->setPen(Qt::NoPen);
-    p->setBrush(color);
-    p->drawPath(m_cachePath);
+    return m_cachePath;
 }
 
 QJsonObject TextObject::toJson() const
@@ -224,12 +315,42 @@ void TextObject::fromJson(const QJsonObject& o)
 
 // ================================================================ shapes
 
+namespace {
+const char* const FRAME_IDS[] = {"single", "double", "thick-thin"};
+const char* const FILL_IDS[] = {"none", "solid", "linear", "radial", "pattern"};
+const char* const CAP_IDS[] = {"none", "arrow", "triangle", "dot", "bar"};
+
+int indexOf(const char* const* ids, int n, const QString& id, int def)
+{
+    for (int i = 0; i < n; ++i)
+        if (id == QLatin1String(ids[i]))
+            return i;
+    return def;
+}
+} // namespace
+
 QJsonObject ShapeObject::toJson() const
 {
     QJsonObject o = LabelObject::toJson();
     o[QStringLiteral("stroke")] = colorToString(stroke);
     o[QStringLiteral("strokeWidth")] = strokeWidth;
     o[QStringLiteral("fill")] = colorToString(fill);
+    if (strokeStyle != 1)
+        o[QStringLiteral("strokeStyle")] = strokeStyle;
+    if (frame != shapes::FrameSingle) {
+        o[QStringLiteral("frame")] = QLatin1String(FRAME_IDS[std::clamp(frame, 0, 2)]);
+        o[QStringLiteral("frameGap")] = frameGap;
+    }
+    o[QStringLiteral("fillType")] = QLatin1String(FILL_IDS[std::clamp(fillType, 0, 4)]);
+    if (fillType == shapes::FillLinear || fillType == shapes::FillRadial || fillType == shapes::FillPattern)
+        o[QStringLiteral("fill2")] = colorToString(fill2);
+    if (fillType == shapes::FillLinear)
+        o[QStringLiteral("gradientAngle")] = gradientAngle;
+    if (fillType == shapes::FillPattern) {
+        o[QStringLiteral("pattern")] = shapes::patternId(pattern);
+        o[QStringLiteral("patternSpacing")] = patternSpacing;
+        o[QStringLiteral("patternWidth")] = patternWidth;
+    }
     return o;
 }
 
@@ -237,33 +358,89 @@ void ShapeObject::fromJson(const QJsonObject& o)
 {
     LabelObject::fromJson(o);
     stroke = colorFrom(o.value(QStringLiteral("stroke")), Qt::black);
-    strokeWidth = num(o, "strokeWidth", 0.3);
+    strokeWidth = std::max(0.0, num(o, "strokeWidth", 0.3));
     fill = colorFrom(o.value(QStringLiteral("fill")), Qt::transparent);
+    strokeStyle = std::clamp(int(num(o, "strokeStyle", 1)), 1, 5);
+    frame = indexOf(FRAME_IDS, 3, str(o, "frame", QString()), shapes::FrameSingle);
+    frameGap = std::clamp(num(o, "frameGap", 0.6), 0.05, 20.0);
+    // files written before "fillType" existed: a visible fill colour means a solid fill
+    const int legacy = fill.alpha() > 0 ? shapes::FillSolid : shapes::FillNone;
+    fillType = indexOf(FILL_IDS, 5, str(o, "fillType", QString()), legacy);
+    fill2 = colorFrom(o.value(QStringLiteral("fill2")), Qt::white);
+    gradientAngle = num(o, "gradientAngle", 0);
+    const int pat = shapes::patternFromId(str(o, "pattern", QString()));
+    pattern = pat >= 0 ? pat : shapes::PatDiagonal;
+    patternSpacing = std::clamp(num(o, "patternSpacing", 1.5), 0.2, 50.0);
+    patternWidth = std::clamp(num(o, "patternWidth", 0.3), 0.05, 20.0);
+    m_frameKey.clear();
 }
 
-static void setupShapePainter(QPainter* p, const ShapeObject& s)
+QPainterPath ShapeObject::frameRegionCached() const
 {
-    if (s.strokeWidth > 0 && s.stroke.alpha() > 0) {
-        QPen pen(s.stroke, s.strokeWidth);
-        pen.setJoinStyle(Qt::MiterJoin);
-        p->setPen(pen);
-    } else {
-        p->setPen(Qt::NoPen);
+    // the file form covers every parameter of the outline, including the subclass ones
+    const QString key = QString::fromUtf8(QJsonDocument(toJson()).toJson(QJsonDocument::Compact));
+    if (key != m_frameKey) {
+        m_frame = shapes::frameRegion(outline(0), frame, strokeWidth, frameGap);
+        m_frameKey = key;
     }
-    p->setBrush(s.fill.alpha() > 0 ? QBrush(s.fill) : Qt::NoBrush);
+    return m_frame;
+}
+
+void ShapeObject::paint(QPainter* p, const RenderContext& ctx) const
+{
+    shapes::FillStyle fs;
+    fs.type = fillType;
+    fs.color = fill;
+    fs.color2 = fill2;
+    fs.angle = gradientAngle;
+    fs.pattern = pattern;
+    fs.spacing = patternSpacing;
+    fs.lineWidth = patternWidth;
+    const QRectF box(0, 0, w, h);
+    const bool hasStroke = strokeWidth > 0 && stroke.alpha() > 0;
+    if (frame == shapes::FrameSingle || !hasStroke) {
+        // the outline stays inside the box
+        const QPainterPath path = outline(hasStroke ? strokeWidth / 2 : 0);
+        shapes::fillPath(p, path, fs, box, ctx);
+        if (hasStroke) {
+            QPen pen(stroke, strokeWidth);
+            pen.setJoinStyle(Qt::MiterJoin);
+            pen.setStyle(Qt::PenStyle(strokeStyle));
+            p->strokePath(path, pen);
+        }
+        return;
+    }
+    shapes::fillPath(p, outline(0), fs, box, ctx);
+    p->fillPath(frameRegionCached(), stroke);
+}
+
+QPainterPath ShapeObject::silhouette(const RenderContext&) const
+{
+    const bool hasStroke = strokeWidth > 0 && stroke.alpha() > 0;
+    if (fillType != shapes::FillNone && !(fillType == shapes::FillSolid && fill.alpha() == 0))
+        return outline(0);
+    if (!hasStroke)
+        return QPainterPath();
+    if (frame != shapes::FrameSingle)
+        return frameRegionCached();
+    QPainterPathStroker s;
+    s.setWidth(strokeWidth);
+    s.setJoinStyle(Qt::MiterJoin);
+    s.setDashPattern(Qt::PenStyle(strokeStyle));
+    return s.createStroke(outline(strokeWidth / 2));
 }
 
 QString RectObject::displayType() const { return tr("Прямоугольник"); }
 
-void RectObject::paint(QPainter* p, const RenderContext&) const
+QPainterPath RectObject::outline(double inset) const
 {
-    setupShapePainter(p, *this);
-    const double hw = strokeWidth > 0 ? strokeWidth / 2 : 0;  // keep the outline inside the box
-    const QRectF r = QRectF(0, 0, w, h).adjusted(hw, hw, -hw, -hw);
+    QPainterPath p;
+    const QRectF r = QRectF(0, 0, w, h).adjusted(inset, inset, -inset, -inset);
     if (radius > 0)
-        p->drawRoundedRect(r, radius, radius);
+        p.addRoundedRect(r, radius, radius);
     else
-        p->drawRect(r);
+        p.addRect(r);
+    return p;
 }
 
 QJsonObject RectObject::toJson() const
@@ -281,11 +458,57 @@ void RectObject::fromJson(const QJsonObject& o)
 
 QString EllipseObject::displayType() const { return tr("Эллипс"); }
 
-void EllipseObject::paint(QPainter* p, const RenderContext&) const
+QPainterPath EllipseObject::outline(double inset) const
 {
-    setupShapePainter(p, *this);
-    const double hw = strokeWidth > 0 ? strokeWidth / 2 : 0;
-    p->drawEllipse(QRectF(0, 0, w, h).adjusted(hw, hw, -hw, -hw));
+    QPainterPath p;
+    p.addEllipse(QRectF(0, 0, w, h).adjusted(inset, inset, -inset, -inset));
+    return p;
+}
+
+PolyShapeObject::PolyShapeObject()
+{
+    w = 20;
+    h = 20;
+    setKind(shapes::Star);
+}
+
+QString PolyShapeObject::displayType() const { return shapes::kindName(kind); }
+
+void PolyShapeObject::setKind(int k)
+{
+    kind = std::clamp(k, 0, int(shapes::KindCount) - 1);
+    double mn, mx;
+    int dec;
+    shapes::paramRange(kind, 1, &mn, &mx, &param1, &dec);
+    shapes::paramRange(kind, 2, &mn, &mx, &param2, &dec);
+}
+
+QPainterPath PolyShapeObject::outline(double inset) const
+{
+    return shapes::shapePath(kind, std::max(0.01, w - 2 * inset), std::max(0.01, h - 2 * inset), param1, param2)
+        .translated(inset, inset);
+}
+
+QJsonObject PolyShapeObject::toJson() const
+{
+    QJsonObject o = ShapeObject::toJson();
+    o[QStringLiteral("kind")] = shapes::kindId(kind);
+    o[QStringLiteral("param1")] = param1;
+    o[QStringLiteral("param2")] = param2;
+    return o;
+}
+
+void PolyShapeObject::fromJson(const QJsonObject& o)
+{
+    ShapeObject::fromJson(o);
+    const int k = shapes::kindFromId(str(o, "kind", QString()));
+    setKind(k >= 0 ? k : shapes::Polygon);
+    double mn, mx, def;
+    int dec;
+    shapes::paramRange(kind, 1, &mn, &mx, &def, &dec);
+    param1 = std::clamp(num(o, "param1", def), mn, mx);
+    shapes::paramRange(kind, 2, &mn, &mx, &def, &dec);
+    param2 = std::clamp(num(o, "param2", def), mn, mx);
 }
 
 // ================================================================ line
@@ -294,13 +517,91 @@ LineObject::LineObject() { w = 30; h = 2; }
 
 QString LineObject::displayType() const { return tr("Линия"); }
 
+double LineObject::capLength() const { return std::max(0.5, std::clamp(capSize, 1.0, 20.0) * std::max(width, 0.1)); }
+
+// Where the drawn shaft starts and ends: a filled head covers the shaft end,
+// so the flat line end does not poke out of its tip.
+void LineObject::shaftEnds(double* x0, double* x1) const
+{
+    const double len = capLength();
+    *x0 = startCap == CapTriangle ? len * 0.8 : startCap == CapArrow ? width / 2 : 0;
+    *x1 = w - (endCap == CapTriangle ? len * 0.8 : endCap == CapArrow ? width / 2 : 0);
+}
+
+QPainterPath LineObject::capPath(int cap, bool atEnd) const
+{
+    QPainterPath path;
+    const double len = capLength(), cy = h / 2;
+    const double tip = atEnd ? w : 0;
+    const double dir = atEnd ? -1 : 1;  // from the tip into the line
+    switch (cap) {
+    case CapTriangle: {
+        QPolygonF t{{tip, cy}, {tip + dir * len, cy - len * 0.4}, {tip + dir * len, cy + len * 0.4}};
+        path.addPolygon(t);
+        path.closeSubpath();
+        break;
+    }
+    case CapArrow: {
+        // open head drawn with the line's width; its outer corner sits on the tip
+        const double t = tip + dir * width;
+        QPainterPath v;
+        v.moveTo(t + dir * len, cy - len * 0.45);
+        v.lineTo(t, cy);
+        v.lineTo(t + dir * len, cy + len * 0.45);
+        QPainterPathStroker s;
+        s.setWidth(width);
+        s.setJoinStyle(Qt::MiterJoin);
+        s.setCapStyle(Qt::FlatCap);
+        path = s.createStroke(v);
+        break;
+    }
+    case CapDot: {
+        const double r = len * 0.3;
+        path.addEllipse(QPointF(tip + dir * r, cy), r, r);
+        break;
+    }
+    case CapBar: {
+        const double bw = std::max(width, 0.2);
+        path.addRect(QRectF(atEnd ? tip - bw : tip, cy - len / 2, bw, len));
+        break;
+    }
+    default: break;
+    }
+    return path;
+}
+
 void LineObject::paint(QPainter* p, const RenderContext&) const
 {
     QPen pen(color, width);
     pen.setStyle(Qt::PenStyle(qBound(1, penStyle, 5)));
     pen.setCapStyle(Qt::FlatCap);
     p->setPen(pen);
-    p->drawLine(QPointF(0, h / 2), QPointF(w, h / 2));
+    double x0, x1;
+    shaftEnds(&x0, &x1);
+    if (x1 > x0)
+        p->drawLine(QPointF(x0, h / 2), QPointF(x1, h / 2));
+    p->setPen(Qt::NoPen);
+    if (startCap != CapNone)
+        p->fillPath(capPath(startCap, false), color);
+    if (endCap != CapNone)
+        p->fillPath(capPath(endCap, true), color);
+}
+
+QPainterPath LineObject::silhouette(const RenderContext&) const
+{
+    double x0, x1;
+    shaftEnds(&x0, &x1);
+    QPainterPath shaft;
+    shaft.moveTo(x0, h / 2);
+    shaft.lineTo(std::max(x0, x1), h / 2);
+    QPainterPathStroker s;
+    s.setWidth(width);
+    s.setCapStyle(Qt::FlatCap);
+    s.setDashPattern(Qt::PenStyle(qBound(1, penStyle, 5)));
+    QPainterPath out = s.createStroke(shaft);
+    out.addPath(capPath(startCap, false));
+    out.addPath(capPath(endCap, true));
+    return out;
 }
 
 QJsonObject LineObject::toJson() const
@@ -309,6 +610,12 @@ QJsonObject LineObject::toJson() const
     o[QStringLiteral("color")] = colorToString(color);
     o[QStringLiteral("width")] = width;
     o[QStringLiteral("style")] = penStyle;
+    if (startCap != CapNone)
+        o[QStringLiteral("startCap")] = QLatin1String(CAP_IDS[std::clamp(startCap, 0, 4)]);
+    if (endCap != CapNone)
+        o[QStringLiteral("endCap")] = QLatin1String(CAP_IDS[std::clamp(endCap, 0, 4)]);
+    if (startCap != CapNone || endCap != CapNone)
+        o[QStringLiteral("capSize")] = capSize;
     return o;
 }
 
@@ -318,6 +625,9 @@ void LineObject::fromJson(const QJsonObject& o)
     color = colorFrom(o.value(QStringLiteral("color")), Qt::black);
     width = num(o, "width", 0.3);
     penStyle = int(num(o, "style", 1));
+    startCap = indexOf(CAP_IDS, 5, str(o, "startCap", QString()), CapNone);
+    endCap = indexOf(CAP_IDS, 5, str(o, "endCap", QString()), CapNone);
+    capSize = std::clamp(num(o, "capSize", 4), 1.0, 20.0);
 }
 
 // ================================================================ image

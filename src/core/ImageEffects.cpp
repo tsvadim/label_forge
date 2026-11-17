@@ -82,6 +82,58 @@ QImage ditherToMono(const QImage& src)
 
 namespace {
 
+// One running-sum box pass over n values spaced `stride` apart.
+void boxPass(std::vector<int>& a, int offset, int n, int stride, int r, std::vector<int>& tmp)
+{
+    tmp.resize(size_t(n));
+    long sum = 0;
+    const int win = 2 * r + 1;
+    auto at = [&](int i) { return i < 0 || i >= n ? 0 : a[size_t(offset + i * stride)]; };
+    for (int i = -r; i <= r; ++i)
+        sum += at(i);
+    for (int i = 0; i < n; ++i) {
+        tmp[size_t(i)] = int(sum / win);
+        sum += at(i + r + 1) - at(i - r);
+    }
+    for (int i = 0; i < n; ++i)
+        a[size_t(offset + i * stride)] = tmp[size_t(i)];
+}
+
+} // namespace
+
+QImage blurSilhouette(const QImage& src, int radiusPx, const QColor& color)
+{
+    const QImage in = src.convertToFormat(QImage::Format_ARGB32);
+    const int w = in.width(), h = in.height();
+    std::vector<int> alpha(size_t(w) * size_t(h));
+    for (int y = 0; y < h; ++y) {
+        const QRgb* line = reinterpret_cast<const QRgb*>(in.constScanLine(y));
+        for (int x = 0; x < w; ++x)
+            alpha[size_t(y) * size_t(w) + size_t(x)] = qAlpha(line[x]);
+    }
+    const int r = std::max(1, radiusPx / 3);
+    std::vector<int> tmp;
+    if (radiusPx > 0) {
+        for (int pass = 0; pass < 3; ++pass) {
+            for (int y = 0; y < h; ++y)
+                boxPass(alpha, y * w, w, 1, r, tmp);
+            for (int x = 0; x < w; ++x)
+                boxPass(alpha, x, h, w, r, tmp);
+        }
+    }
+    QImage out(w, h, QImage::Format_ARGB32);
+    const int ca = color.alpha();
+    for (int y = 0; y < h; ++y) {
+        QRgb* line = reinterpret_cast<QRgb*>(out.scanLine(y));
+        for (int x = 0; x < w; ++x)
+            line[x] = qRgba(color.red(), color.green(), color.blue(),
+                            alpha[size_t(y) * size_t(w) + size_t(x)] * ca / 255);
+    }
+    return out;
+}
+
+namespace {
+
 bool keepColor(QStringView value)
 {
     const QString s = value.trimmed().toString().toLower();

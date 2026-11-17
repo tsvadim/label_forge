@@ -32,6 +32,15 @@ public:
     virtual QJsonObject toJson() const;
     virtual void fromJson(const QJsonObject& o);
 
+    // Paints the drop shadow, if any, and then the object; use this rather
+    // than paint() when drawing a label.
+    void draw(QPainter* p, const RenderContext& ctx) const;
+    virtual bool supportsShadow() const { return true; }
+    // Outline for a sharp vector shadow; empty = take it from a raster of paint().
+    virtual QPainterPath silhouette(const RenderContext& ctx) const;
+    // How far the shadow reaches outside the box, mm (0 without a shadow).
+    double shadowReach() const;
+
     std::unique_ptr<LabelObject> clone() const;
     static std::unique_ptr<LabelObject> create(const QString& typeName);
     static std::unique_ptr<LabelObject> fromJsonAny(const QJsonObject& o);
@@ -43,6 +52,15 @@ public:
     double rotation = 0;
     bool locked = false;
     bool printable = true;
+
+    bool shadow = false;
+    double shadowDx = 1.0, shadowDy = 1.0;  // mm
+    QColor shadowColor = Qt::black;
+    double shadowOpacity = 0.6;
+    double shadowBlur = 0;  // mm, 0 = sharp (stays vector)
+
+private:
+    void paintShadow(QPainter* p, const RenderContext& ctx) const;
 };
 
 class TextObject : public LabelObject {
@@ -53,6 +71,7 @@ public:
     void paint(QPainter* p, const RenderContext& ctx) const override;
     QJsonObject toJson() const override;
     void fromJson(const QJsonObject& o) override;
+    QPainterPath silhouette(const RenderContext& ctx) const override;
 
     QString text;
     QString fontFamily = QStringLiteral("Arial");
@@ -66,48 +85,105 @@ public:
     double lineSpacing = 1.0;
 
 private:
+    const QPainterPath& textPath(const RenderContext& ctx) const;
     mutable QString m_cacheKey;
     mutable QPainterPath m_cachePath;
 };
 
+// Closed shape with an outline (single, double or thick + thin frame) and a
+// fill (solid, gradient or hatching); see ShapePaths.h for the drawing.
 class ShapeObject : public LabelObject {
 public:
+    void paint(QPainter* p, const RenderContext& ctx) const override;
     QJsonObject toJson() const override;
     void fromJson(const QJsonObject& o) override;
+    QPainterPath silhouette(const RenderContext& ctx) const override;
+
     QColor stroke = Qt::black;
     double strokeWidth = 0.3;  // mm, 0 = no outline
-    QColor fill = Qt::transparent;
+    int strokeStyle = 1;       // Qt::PenStyle, single frame only
+    int frame = 0;             // shapes::Frame
+    double frameGap = 0.6;     // mm between the lines of a double frame
+
+    int fillType = 0;          // shapes::FillType
+    QColor fill = Qt::transparent;  // solid colour, first gradient colour, hatching
+    QColor fill2 = Qt::white;       // second gradient colour, hatching background
+    double gradientAngle = 0;       // degrees
+    int pattern = 2;                // shapes::Pattern
+    double patternSpacing = 1.5;    // mm
+    double patternWidth = 0.3;      // mm
+
+protected:
+    // The shape inside the box shrunk by `inset` on every side.
+    virtual QPainterPath outline(double inset) const = 0;
+
+private:
+    QPainterPath frameRegionCached() const;
+    mutable QString m_frameKey;
+    mutable QPainterPath m_frame;
 };
 
 class RectObject : public ShapeObject {
 public:
     QString typeName() const override { return QStringLiteral("rect"); }
     QString displayType() const override;
-    void paint(QPainter* p, const RenderContext& ctx) const override;
     QJsonObject toJson() const override;
     void fromJson(const QJsonObject& o) override;
     double radius = 0;
+
+protected:
+    QPainterPath outline(double inset) const override;
 };
 
 class EllipseObject : public ShapeObject {
 public:
     QString typeName() const override { return QStringLiteral("ellipse"); }
     QString displayType() const override;
-    void paint(QPainter* p, const RenderContext& ctx) const override;
+
+protected:
+    QPainterPath outline(double inset) const override;
+};
+
+// Ready-made shape: polygon, star, arrow, callout... (shapes::Kind) with two
+// kind-specific parameters (counts, or percent of the box).
+class PolyShapeObject : public ShapeObject {
+public:
+    PolyShapeObject();
+    QString typeName() const override { return QStringLiteral("shape"); }
+    QString displayType() const override;
+    QJsonObject toJson() const override;
+    void fromJson(const QJsonObject& o) override;
+    void setKind(int kind);  // also resets the parameters to the kind's defaults
+
+    int kind = 0;
+    double param1 = 6, param2 = 0;
+
+protected:
+    QPainterPath outline(double inset) const override;
 };
 
 // Horizontal line through the middle of its box; rotate it for other angles.
 class LineObject : public LabelObject {
 public:
+    enum Cap { CapNone = 0, CapArrow = 1, CapTriangle = 2, CapDot = 3, CapBar = 4 };
+
     LineObject();
     QString typeName() const override { return QStringLiteral("line"); }
     QString displayType() const override;
     void paint(QPainter* p, const RenderContext& ctx) const override;
     QJsonObject toJson() const override;
     void fromJson(const QJsonObject& o) override;
+    QPainterPath silhouette(const RenderContext& ctx) const override;
     QColor color = Qt::black;
     double width = 0.3;
     int penStyle = 1;  // Qt::PenStyle
+    int startCap = CapNone, endCap = CapNone;
+    double capSize = 4;  // cap length in line widths
+
+private:
+    double capLength() const;
+    QPainterPath capPath(int cap, bool atEnd) const;
+    void shaftEnds(double* x0, double* x1) const;
 };
 
 // Raster (embedded PNG or file) or SVG (embedded or file) image. Crop, flip,
@@ -159,6 +235,7 @@ public:
     void paint(QPainter* p, const RenderContext& ctx) const override;
     QJsonObject toJson() const override;
     void fromJson(const QJsonObject& o) override;
+    bool supportsShadow() const override { return false; }  // a shadow confuses scanners
 
     QString symbology = QStringLiteral("code128");
     QString data = QStringLiteral("1234567890");
