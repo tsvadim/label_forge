@@ -103,7 +103,7 @@ RenderContext PrintJob::contextFor(const LabelInstance& li) const
     return ctx;
 }
 
-void PrintJob::renderPage(QPainter* p, int page, double deviceDpi) const
+void PrintJob::renderPage(QPainter* p, int page, double deviceDpi, bool mono) const
 {
     const int per = m_layout.roll ? 1 : m_layout.perPage();
     const int skip = m_layout.roll ? 0 : std::clamp(m_settings.startPosition, 1, per) - 1;
@@ -119,6 +119,7 @@ void PrintJob::renderPage(QPainter* p, int page, double deviceDpi) const
         const double dy = (cell.height() - m_doc.label.height) / 2.0;
         RenderContext ctx = contextFor(m_instances.at(idx));
         ctx.deviceDpi = deviceDpi;
+        ctx.monoDither = mono;
         p->save();
         p->translate(cell.x() + dx + m_settings.offsetX, cell.y() + dy + m_settings.offsetY);
         renderLabel(p, m_doc, ctx, opt);

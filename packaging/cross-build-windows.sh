@@ -17,6 +17,11 @@ cmake -S qtbase -B qtbuild -G Ninja -DCMAKE_TOOLCHAIN_FILE="$SRC/packaging/mingw
   -DFEATURE_testlib=OFF -DFEATURE_vulkan=OFF -DFEATURE_system_zlib=OFF -DFEATURE_system_pcre2=OFF \
   -DFEATURE_system_harfbuzz=OFF -DFEATURE_system_freetype=OFF
 cmake --build qtbuild --parallel && cmake --install qtbuild
+[ -d qtsvg ] || git clone --depth 1 -b v6.4.2 https://github.com/qt/qtsvg.git
+"$QT_WIN_PREFIX/bin/qt-cmake" -S qtsvg -B svgbuild -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DQT_HOST_PATH=/usr -DQT_HOST_PATH_CMAKE_DIR=/usr/lib/x86_64-linux-gnu/cmake \
+  -DQT_BUILD_EXAMPLES=OFF -DQT_BUILD_TESTS=OFF
+cmake --build svgbuild --parallel && cmake --install svgbuild
 "$QT_WIN_PREFIX/bin/qt-cmake" -S "$SRC" -B app -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DQT_HOST_PATH=/usr -DQT_HOST_PATH_CMAKE_DIR=/usr/lib/x86_64-linux-gnu/cmake -DLABELFORGE_BUILD_TESTS=OFF \
   -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++ -s" \

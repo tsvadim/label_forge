@@ -18,7 +18,13 @@
 
 #include <QApplication>
 #include <QDir>
+#include <QDropEvent>
+#include <QFile>
+#include <QMimeData>
 #include <QMouseEvent>
+#include <QScrollBar>
+#include <QStatusBar>
+#include <QWindow>
 #include <QTest>
 #include <QUndoStack>
 #include <cstdio>
@@ -202,6 +208,40 @@ int main(int argc, char** argv)
     scene->clearSelection();
     settle();
     shot(&w, out, QStringLiteral("04_label_props"));
+
+    // drop an SVG file: becomes an embedded image with its own property section
+    {
+        const QString svgPath = out.filePath(QStringLiteral("icon.svg"));
+        QFile sf(svgPath);
+        sf.open(QIODevice::WriteOnly);
+        sf.write("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"40\" height=\"20\">"
+                 "<rect width=\"40\" height=\"20\" rx=\"4\" fill=\"#2a7\"/></svg>");
+        sf.close();
+        const int n = int(scene->document()->objects.size());
+        QMimeData mime;
+        mime.setUrls({QUrl::fromLocalFile(svgPath)});
+        // Qt delivers drops through the window, after an accepted DragEnter; aim at the
+        // status bar, which does not take drops itself, so the main window gets them
+        const QPoint at = w.statusBar()->mapTo(&w, w.statusBar()->rect().center());
+        QDragEnterEvent enter(at, Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(w.windowHandle(), &enter);
+        QDropEvent drop(QPointF(at), Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(w.windowHandle(), &drop);
+        settle();
+        CHECK(int(scene->document()->objects.size()) == n + 1, "dropped svg inserts an object");
+        auto* im = dynamic_cast<ImageObject*>(scene->document()->objects.back().get());
+        CHECK(im && !im->svgData.isEmpty() && std::abs(im->h * 2 - im->w) < 0.01, "svg embedded with its aspect ratio");
+        if (im) {
+            scene->selectObjects({im});
+            settle();
+            shot(&w, out, QStringLiteral("05_image_props"));
+            auto* panel = w.findChild<PropertyPanel*>();
+            panel->verticalScrollBar()->setValue(panel->verticalScrollBar()->maximum());
+            shot(panel, out, QStringLiteral("06_image_props_bottom"));
+        }
+        undo->undo();
+        settle();
+    }
 
     // dialogs
     DataTable data;

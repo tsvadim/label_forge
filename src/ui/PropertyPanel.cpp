@@ -12,6 +12,7 @@
 #include <QColorDialog>
 #include <QComboBox>
 #include <QDoubleSpinBox>
+#include <QFile>
 #include <QFileDialog>
 #include <QFontComboBox>
 #include <QFormLayout>
@@ -467,29 +468,42 @@ void PropertyPanel::buildImage(QFormLayout* f, ImageObject* im)
 {
     auto* load = new QPushButton(tr("Загрузить и встроить…"));
     connect(load, &QPushButton::clicked, this, [this, im] {
-        QStringList filters;
+        QStringList filters{QStringLiteral("*.svg"), QStringLiteral("*.svgz")};
         for (const QByteArray& fmt : QImageReader::supportedImageFormats())
             filters << QStringLiteral("*.") + QString::fromLatin1(fmt);
+        filters.removeDuplicates();
         const QString path = QFileDialog::getOpenFileName(this, tr("Изображение"), QString(),
                                                           tr("Изображения (%1)").arg(filters.join(QLatin1Char(' '))));
         if (path.isEmpty())
             return;
-        QImageReader reader(path);
-        reader.setAutoTransform(true);
-        QImage img = reader.read();
-        if (img.isNull()) {
-            QMessageBox::warning(this, tr("Изображение"), reader.errorString());
+        QString err;
+        if (!im->loadFile(path, &err)) {
+            QMessageBox::warning(this, tr("Изображение"), err);
             return;
         }
-        if (img.width() > 2000 || img.height() > 2000)
-            img = img.scaled(2000, 2000, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-        im->setEmbedded(img);
-        if (img.width() > 0 && img.height() > 0)
-            im->h = im->w * img.height() / img.width();
+        const QSizeF s = im->sourceSizeMm(RenderContext());
+        if (!s.isEmpty())
+            im->h = im->w * s.height() / s.width();
         edited(im, QStringLiteral("image"));
         rebuildLater();
     });
     f->addRow(load);
+    auto* saveAs = new QPushButton(tr("Сохранить изображение как…"));
+    saveAs->setEnabled(!im->imageData.isEmpty() || !im->svgData.isEmpty());
+    connect(saveAs, &QPushButton::clicked, this, [this, im] {
+        const bool svg = !im->svgData.isEmpty();
+        const bool gz = svg && im->svgData.startsWith("\x1f\x8b");
+        const QString suffix = svg ? (gz ? QStringLiteral("svgz") : QStringLiteral("svg")) : QStringLiteral("png");
+        const QString path = QFileDialog::getSaveFileName(this, tr("Сохранить изображение"),
+                                                          tr("изображение.%1").arg(suffix),
+                                                          QStringLiteral("%1 (*.%2)").arg(suffix.toUpper(), suffix));
+        if (path.isEmpty())
+            return;
+        QFile out(path);
+        if (!out.open(QIODevice::WriteOnly) || out.write(svg ? im->svgData : im->imageData) < 0)
+            QMessageBox::warning(this, tr("Изображение"), out.errorString());
+    });
+    f->addRow(saveAs);
     auto* path = new QLineEdit(im->pathTemplate);
     path->setPlaceholderText(tr("или путь к файлу, напр. photos\\{Артикул}.jpg"));
     connect(path, &QLineEdit::textEdited, this, [this, im](const QString& s) {
@@ -505,20 +519,105 @@ void PropertyPanel::buildImage(QFormLayout* f, ImageObject* im)
         im->imageData.clear();
         edited(im, QStringLiteral("imagePath"));
     }));
-    auto* aspect = new QCheckBox(tr("Сохранять пропорции"));
-    aspect->setChecked(im->keepAspect);
-    connect(aspect, &QCheckBox::toggled, this, [this, im](bool v) {
-        im->keepAspect = v;
-        edited(im, QStringLiteral("keepAspect"));
+    auto check = [this, im, f](const QString& text, bool value, const QString& key, std::function<void(bool)> set) {
+        auto* cb = new QCheckBox(text);
+        cb->setChecked(value);
+        connect(cb, &QCheckBox::toggled, this, [this, im, key, set](bool v) {
+            set(v);
+            edited(im, key);
+        });
+        f->addRow(cb);
+        return cb;
+    };
+
+    f->addRow(section(tr("Размещение")));
+    auto* fit = new QComboBox;
+    fit->addItems({tr("Без масштаба"), tr("Пропорционально"), tr("Растянуть")});
+    fit->setCurrentIndex(im->fit);
+    f->addRow(tr("Вписать:"), fit);
+    auto* ha = new QComboBox;
+    ha->addItems({tr("Слева"), tr("По центру"), tr("Справа")});
+    ha->setCurrentIndex(im->hAlign);
+    connect(ha, &QComboBox::currentIndexChanged, this, [this, im](int i) {
+        im->hAlign = i;
+        edited(im, QStringLiteral("hAlign"));
     });
-    f->addRow(aspect);
-    auto* mono = new QCheckBox(tr("Оттенки серого"));
-    mono->setChecked(im->monochrome);
-    connect(mono, &QCheckBox::toggled, this, [this, im](bool v) {
-        im->monochrome = v;
-        edited(im, QStringLiteral("monochrome"));
+    f->addRow(tr("По горизонтали:"), ha);
+    auto* va = new QComboBox;
+    va->addItems({tr("Сверху"), tr("По середине"), tr("Снизу")});
+    va->setCurrentIndex(im->vAlign);
+    connect(va, &QComboBox::currentIndexChanged, this, [this, im](int i) {
+        im->vAlign = i;
+        edited(im, QStringLiteral("vAlign"));
     });
-    f->addRow(mono);
+    f->addRow(tr("По вертикали:"), va);
+    auto syncAlign = [ha, va, fit] {
+        ha->setEnabled(fit->currentIndex() != ImageObject::FitStretch);
+        va->setEnabled(fit->currentIndex() != ImageObject::FitStretch);
+    };
+    syncAlign();
+    connect(fit, &QComboBox::currentIndexChanged, this, [this, im, syncAlign](int i) {
+        im->fit = i;
+        syncAlign();
+        edited(im, QStringLiteral("fit"));
+    });
+    auto cropSpin = [this, im](double ImageObject::*field, const QString& tip, const QString& key) {
+        auto* s = spin(0, 99, 0, 1, QStringLiteral("%"), [im, field] { return im->*field; },
+                       [this, im, field, key](double v) {
+                           im->*field = v;
+                           edited(im, key);
+                       });
+        s->setToolTip(tip);
+        return s;
+    };
+    auto cropRow = [f](const QString& label, QWidget* a, QWidget* b) {
+        auto* row = new QWidget;
+        auto* l = new QHBoxLayout(row);
+        l->setContentsMargins(0, 0, 0, 0);
+        l->addWidget(a);
+        l->addWidget(b);
+        f->addRow(label, row);
+    };
+    cropRow(tr("Обрезка Л / П:"), cropSpin(&ImageObject::cropLeft, tr("Обрезать слева"), QStringLiteral("cropLeft")),
+            cropSpin(&ImageObject::cropRight, tr("Обрезать справа"), QStringLiteral("cropRight")));
+    cropRow(tr("Обрезка В / Н:"), cropSpin(&ImageObject::cropTop, tr("Обрезать сверху"), QStringLiteral("cropTop")),
+            cropSpin(&ImageObject::cropBottom, tr("Обрезать снизу"), QStringLiteral("cropBottom")));
+    check(tr("Отразить по горизонтали"), im->flipH, QStringLiteral("flipH"), [im](bool v) { im->flipH = v; });
+    check(tr("Отразить по вертикали"), im->flipV, QStringLiteral("flipV"), [im](bool v) { im->flipV = v; });
+
+    f->addRow(section(tr("Цвет")));
+    f->addRow(tr("Непрозрачность:"), spin(0, 100, 0, 5, QStringLiteral("%"), [im] { return im->opacity * 100; },
+                                           [this, im](double v) {
+                                               im->opacity = v / 100;
+                                               edited(im, QStringLiteral("opacity"));
+                                           }));
+    const QString rasterTip = tr("У SVG эта настройка переводит картинку в растр (300 dpi в PDF)");
+    auto* bright = spin(-100, 100, 0, 5, QString(), [im] { return double(im->brightness); }, [this, im](double v) {
+        im->brightness = int(v);
+        edited(im, QStringLiteral("brightness"));
+    });
+    bright->setToolTip(rasterTip);
+    f->addRow(tr("Яркость:"), bright);
+    auto* contr = spin(-100, 100, 0, 5, QString(), [im] { return double(im->contrast); }, [this, im](double v) {
+        im->contrast = int(v);
+        edited(im, QStringLiteral("contrast"));
+    });
+    contr->setToolTip(rasterTip);
+    f->addRow(tr("Контраст:"), contr);
+    check(tr("Оттенки серого"), im->monochrome, QStringLiteral("monochrome"), [im](bool v) { im->monochrome = v; })
+        ->setToolTip(rasterTip);
+    auto* recolor = check(tr("Перекрасить значок"), im->recolor, QStringLiteral("recolor"),
+                          [im](bool v) { im->recolor = v; });
+    recolor->setToolTip(tr("Для одноцветных значков. SVG: все цвета, кроме белого, заменяются выбранным.\n"
+                           "Растр: тёмные части получают выбранный цвет, светлые становятся прозрачными."));
+    f->addRow(tr("Цвет значка:"), new ColorButton(im->tintColor, false, [this, im](const QColor& c) {
+                  im->tintColor = c;
+                  edited(im, QStringLiteral("tint"));
+              }));
+    check(tr("Дизеринг на термопринтере"), im->dither, QStringLiteral("dither"),
+          [im](bool v) { im->dither = v; })
+        ->setToolTip(tr("При прямой печати ZPL/TSPL фото и оттенки передаются точечным узором.\n"
+                        "Выключите для логотипов и значков с чёткими краями."));
 }
 
 void PropertyPanel::buildBarcode(QFormLayout* f, BarcodeObject* b)

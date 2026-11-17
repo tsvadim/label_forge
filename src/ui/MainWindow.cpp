@@ -666,7 +666,9 @@ void MainWindow::dropEvent(QDropEvent* e)
                 openFile(path);
             return;
         }
-        if (!QImageReader::imageFormat(path).isEmpty()) {
+        const QString suffix = QFileInfo(path).suffix().toLower();
+        if (suffix == QLatin1String("svg") || suffix == QLatin1String("svgz") ||
+            !QImageReader::imageFormat(path).isEmpty()) {
             insertImageFile(path, QPointF(2, 2));
             return;
         }
@@ -797,9 +799,10 @@ void MainWindow::insertObject(int tool, const QPointF& posIn)
         break;
     }
     case LabelScene::ToolImage: {
-        QStringList filters;
+        QStringList filters{QStringLiteral("*.svg"), QStringLiteral("*.svgz")};
         for (const QByteArray& fmt : QImageReader::supportedImageFormats())
             filters << QStringLiteral("*.") + QString::fromLatin1(fmt);
+        filters.removeDuplicates();
         const QString path = QFileDialog::getOpenFileName(this, tr("Изображение"), baseDir(),
                                                           tr("Изображения (%1)").arg(filters.join(QLatin1Char(' '))));
         m_toolActions.value(LabelScene::ToolSelect)->trigger();
@@ -817,21 +820,17 @@ void MainWindow::insertObject(int tool, const QPointF& posIn)
 
 void MainWindow::insertImageFile(const QString& path, const QPointF& pos)
 {
-    QImageReader reader(path);
-    reader.setAutoTransform(true);
-    QImage img = reader.read();
-    if (img.isNull()) {
-        QMessageBox::warning(this, tr("Изображение"), reader.errorString());
+    auto im = std::make_unique<ImageObject>();
+    QString err;
+    if (!im->loadFile(path, &err)) {
+        QMessageBox::warning(this, tr("Изображение"), err);
         return;
     }
-    if (img.width() > 2000 || img.height() > 2000)
-        img = img.scaled(2000, 2000, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-    auto im = std::make_unique<ImageObject>();
-    im->setEmbedded(img);
+    const QSizeF s = im->sourceSizeMm(RenderContext());
     im->x = pos.x();
     im->y = pos.y();
     im->w = std::min(25.0, std::max(5.0, m_doc.label.width - pos.x()));
-    im->h = im->w * img.height() / std::max(1, img.width());
+    im->h = s.isEmpty() ? im->w : im->w * s.height() / s.width();
     addObject(std::move(im), tr("Добавление изображения"));
 }
 
@@ -917,6 +916,17 @@ void MainWindow::paste()
     if (mime->hasFormat(QLatin1String(MIME_OBJECTS))) {
         ++m_pasteCount;
         added = pasteObjects(mime->data(QLatin1String(MIME_OBJECTS)), 2.0 * m_pasteCount);
+    } else if (mime->hasFormat(QStringLiteral("image/svg+xml"))) {
+        auto im = std::make_unique<ImageObject>();
+        im->setEmbeddedSvg(mime->data(QStringLiteral("image/svg+xml")));
+        const QSizeF s = im->sourceSizeMm(RenderContext());
+        if (!s.isEmpty()) {
+            im->x = im->y = 2;
+            im->w = std::min(30.0, m_doc.label.width - 4);
+            im->h = im->w * s.height() / s.width();
+            added << im.get();
+            m_doc.objects.push_back(std::move(im));
+        }
     } else if (mime->hasImage()) {
         const QImage img = qvariant_cast<QImage>(mime->imageData());
         if (!img.isNull()) {

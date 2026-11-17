@@ -13,7 +13,7 @@ set(CMAKE_AUTOMOC ON)
 option(LABELFORGE_BUILD_TESTS "Build the self-test program" ON)
 option(LABELFORGE_BUILD_APP "Build the GUI application" ON)
 
-find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets PrintSupport Sql)
+find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets PrintSupport Sql Svg)
 qt_standard_project_setup()
 
 if(MSVC)
@@ -29,6 +29,8 @@ add_library(labelforge_core STATIC
     src/core/Variables.cpp
     src/core/TextLayout.h
     src/core/TextLayout.cpp
+    src/core/ImageEffects.h
+    src/core/ImageEffects.cpp
     src/core/LabelObject.h
     src/core/LabelObject.cpp
     src/core/DataSource.h
@@ -55,7 +57,7 @@ add_library(labelforge_core STATIC
     third_party/qrcodegen/qrcodegen.cpp
 )
 target_include_directories(labelforge_core PUBLIC src third_party/qrcodegen)
-target_link_libraries(labelforge_core PUBLIC Qt6::Core Qt6::Gui Qt6::Widgets Qt6::PrintSupport Qt6::Sql)
+target_link_libraries(labelforge_core PUBLIC Qt6::Core Qt6::Gui Qt6::Widgets Qt6::PrintSupport Qt6::Sql Qt6::Svg)
 if(WIN32)
     target_link_libraries(labelforge_core PUBLIC winspool)
 endif()

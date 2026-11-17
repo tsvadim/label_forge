@@ -76,7 +76,7 @@ jobs:
       - name: Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y qt6-base-dev libgl1-mesa-dev cmake ninja-build
+          sudo apt-get install -y qt6-base-dev qt6-svg-dev libgl1-mesa-dev cmake ninja-build
           pip install zxing-cpp pillow openpyxl
       - name: Build
         run: |

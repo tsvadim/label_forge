@@ -30,8 +30,9 @@ public:
     int pageCount() const;
 
     RenderContext contextFor(const LabelInstance& li) const;
-    // painter in millimetres, origin at the page's top-left corner
-    void renderPage(QPainter* p, int page, double deviceDpi) const;
+    // painter in millimetres, origin at the page's top-left corner;
+    // mono = the page will be reduced to 1 bit (thermal), see RenderContext::monoDither
+    void renderPage(QPainter* p, int page, double deviceDpi, bool mono = false) const;
 
     bool printTo(QPrinter* printer, QString* err) const;
     bool exportPdf(const QString& path, QString* err) const;

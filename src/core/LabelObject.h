@@ -7,6 +7,7 @@
 #include <QJsonObject>
 #include <QPainterPath>
 #include <QRectF>
+#include <QSizeF>
 #include <QString>
 #include <memory>
 
@@ -109,25 +110,45 @@ public:
     int penStyle = 1;  // Qt::PenStyle
 };
 
+// Raster (embedded PNG or file) or SVG (embedded or file) image. Crop, flip,
+// opacity and fitting are done by the painter, so SVG stays vector in PDF;
+// brightness/contrast/grayscale and dithering work on a raster copy.
 class ImageObject : public LabelObject {
 public:
+    enum Fit { FitNone = 0, FitContain = 1, FitStretch = 2 };
+
+    ImageObject();
     QString typeName() const override { return QStringLiteral("image"); }
     QString displayType() const override;
     void paint(QPainter* p, const RenderContext& ctx) const override;
     QJsonObject toJson() const override;
     void fromJson(const QJsonObject& o) override;
     void setEmbedded(const QImage& img);
+    void setEmbeddedSvg(const QByteArray& svg);
+    // Embeds a raster file (EXIF-rotated, reduced to 2000 px) or an SVG file.
+    bool loadFile(const QString& path, QString* err);
+    // Size of the uncropped source in millimetres, empty if there is none.
+    QSizeF sourceSizeMm(const RenderContext& ctx) const;
 
     QByteArray imageData;  // embedded PNG
+    QByteArray svgData;    // or embedded SVG
     QString pathTemplate;  // or a file path, may contain {Field}
-    bool keepAspect = true;
-    bool monochrome = false;
+    int fit = FitContain;
+    int hAlign = 1, vAlign = 1;  // 0 left/top, 1 centre, 2 right/bottom
+    double cropLeft = 0, cropTop = 0, cropRight = 0, cropBottom = 0;  // percent
+    bool flipH = false, flipV = false;
+    double opacity = 1.0;
+    int brightness = 0, contrast = 0;  // -100..100
+    bool monochrome = false;           // grayscale
+    bool recolor = false;              // paint a one-colour icon in tintColor
+    QColor tintColor = Qt::black;
+    bool dither = false;               // halftone instead of threshold on thermal printers
 
 private:
-    mutable QImage m_embedded;
-    mutable QByteArray m_embeddedKey;
-    mutable QString m_fileKey;
-    mutable QImage m_file;
+    struct Cache;
+    Cache& cache() const;
+    bool loadSource(const RenderContext& ctx) const;  // fills the cache, false if nothing to draw
+    mutable std::shared_ptr<Cache> m_cache;
 };
 
 class BarcodeObject : public LabelObject {

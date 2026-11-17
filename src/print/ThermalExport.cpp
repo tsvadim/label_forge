@@ -149,7 +149,7 @@ QByteArray buildThermalJob(const PrintJob& job, const LabelDocument& doc, const 
             {
                 QPainter p(&rgb);
                 p.scale(dpi / MM_PER_INCH, dpi / MM_PER_INCH);
-                job.renderPage(&p, pg, dpi);
+                job.renderPage(&p, pg, dpi, true);
             }
             QImage img(wpx, hpx, QImage::Format_Mono);
             img.setColor(0, qRgb(255, 255, 255));

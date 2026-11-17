@@ -22,6 +22,7 @@ struct RenderContext {
     int recordNumber = 1;                  // 1-based record number
     bool rawTemplates = false;             // design view: show "{Field}" literally
     double deviceDpi = 0;                  // >0: raster device, snap barcode modules to dots
+    bool monoDither = false;               // 1-bit thermal output: images with dither on are pre-dithered to dots
     QDateTime now = QDateTime::currentDateTime();
     QString baseDir;                       // resolves relative image paths
 

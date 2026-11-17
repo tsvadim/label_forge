@@ -63,6 +63,7 @@ QImage renderLabelImage(const LabelDocument& doc, const RenderContext& ctxIn, do
     img.fill(Qt::white);
     RenderContext ctx = ctxIn;
     ctx.deviceDpi = dpi;
+    ctx.monoDither = mono;
     {
         QPainter p(&img);
         p.scale(dpi / MM_PER_INCH, dpi / MM_PER_INCH);

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "LabelObject.h"
 
+#include "ImageEffects.h"
 #include "RenderContext.h"
 #include "TextLayout.h"
 #include "barcode/Barcode.h"
@@ -8,9 +9,12 @@
 #include <QBuffer>
 #include <QCoreApplication>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QImageReader>
 #include <QPainter>
+#include <QSvgRenderer>
+#include <algorithm>
 #include <cmath>
 
 namespace lf {
@@ -318,7 +322,68 @@ void LineObject::fromJson(const QJsonObject& o)
 
 // ================================================================ image
 
+struct ImageObject::Cache {
+    QString srcKey;  // which source is loaded
+    QImage raster;
+    QByteArray svg;
+    std::shared_ptr<QSvgRenderer> renderer;  // svg, recoloured if needed
+    QString rendererKey;
+    QString procKey;  // adjusted / rasterized / dithered copy
+    QImage processed;
+};
+
+namespace {
+const char* const FIT_NAMES[] = {"none", "contain", "stretch"};
+
+QSizeF naturalSizeMm(const QSvgRenderer* svg, const QImage& raster)
+{
+    if (svg) {
+        QSizeF s = svg->defaultSize();
+        if (s.isEmpty())
+            s = svg->viewBoxF().size();
+        if (s.isEmpty())
+            s = QSizeF(100, 100);
+        return s * (MM_PER_INCH / 96.0);  // SVG user units are CSS pixels
+    }
+    const double fallback = 96 / 0.0254;
+    const double dpmX = raster.dotsPerMeterX() > 0 ? raster.dotsPerMeterX() : fallback;
+    const double dpmY = raster.dotsPerMeterY() > 0 ? raster.dotsPerMeterY() : fallback;
+    return QSizeF(raster.width() * 1000.0 / dpmX, raster.height() * 1000.0 / dpmY);
+}
+
+// Opacity for 1-bit output: blend towards white before dithering.
+QImage fadeToWhite(QImage img, double opacity)
+{
+    if (opacity >= 1.0)
+        return img;
+    img = img.convertToFormat(QImage::Format_ARGB32);
+    for (int y = 0; y < img.height(); ++y) {
+        QRgb* line = reinterpret_cast<QRgb*>(img.scanLine(y));
+        for (int x = 0; x < img.width(); ++x) {
+            const QRgb px = line[x];
+            auto f = [opacity](int v) { return int(std::lround(v * opacity + 255 * (1 - opacity))); };
+            line[x] = qRgba(f(qRed(px)), f(qGreen(px)), f(qBlue(px)), qAlpha(px));
+        }
+    }
+    return img;
+}
+
+double alignOffset(double avail, double len, int align)
+{
+    return align == 0 ? 0.0 : align == 2 ? avail - len : (avail - len) / 2;
+}
+} // namespace
+
+ImageObject::ImageObject() { dither = true; }
+
 QString ImageObject::displayType() const { return tr("Изображение"); }
+
+ImageObject::Cache& ImageObject::cache() const
+{
+    if (!m_cache)
+        m_cache = std::make_shared<Cache>();
+    return *m_cache;
+}
 
 void ImageObject::setEmbedded(const QImage& img)
 {
@@ -327,32 +392,112 @@ void ImageObject::setEmbedded(const QImage& img)
     buf.open(QIODevice::WriteOnly);
     img.save(&buf, "PNG");
     imageData = ba;
+    svgData.clear();
     pathTemplate.clear();
+}
+
+void ImageObject::setEmbeddedSvg(const QByteArray& svg)
+{
+    svgData = svg;
+    imageData.clear();
+    pathTemplate.clear();
+}
+
+bool ImageObject::loadFile(const QString& path, QString* err)
+{
+    const QString suffix = QFileInfo(path).suffix().toLower();
+    if (suffix == QLatin1String("svg") || suffix == QLatin1String("svgz")) {
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly)) {
+            if (err)
+                *err = f.errorString();
+            return false;
+        }
+        const QByteArray data = f.readAll();
+        if (!QSvgRenderer(data).isValid()) {
+            if (err)
+                *err = tr("Файл не является корректным SVG");
+            return false;
+        }
+        setEmbeddedSvg(data);
+        return true;
+    }
+    QImageReader reader(path);
+    reader.setAutoTransform(true);
+    QImage img = reader.read();
+    if (img.isNull()) {
+        if (err)
+            *err = reader.errorString();
+        return false;
+    }
+    if (img.width() > 2000 || img.height() > 2000) {
+        // keep the physical size: scale the resolution along with the pixels
+        const QSizeF mm = naturalSizeMm(nullptr, img);
+        img = img.scaled(2000, 2000, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        img.setDotsPerMeterX(int(std::lround(img.width() * 1000.0 / mm.width())));
+        img.setDotsPerMeterY(int(std::lround(img.height() * 1000.0 / mm.height())));
+    }
+    setEmbedded(img);
+    return true;
+}
+
+bool ImageObject::loadSource(const RenderContext& ctx) const
+{
+    Cache& c = cache();
+    QString key, path;
+    if (!svgData.isEmpty()) {
+        key = QStringLiteral("svg:%1:%2").arg(qHash(svgData)).arg(svgData.size());
+    } else if (!imageData.isEmpty()) {
+        key = QStringLiteral("png:%1:%2").arg(qHash(imageData)).arg(imageData.size());
+    } else if (!pathTemplate.isEmpty()) {
+        path = expandTemplate(pathTemplate, ctx);
+        if (QFileInfo(path).isRelative() && !ctx.baseDir.isEmpty())
+            path = QDir(ctx.baseDir).filePath(path);
+        key = QStringLiteral("file:") + path;
+    }
+    if (key != c.srcKey) {
+        c = Cache();
+        c.srcKey = key;
+        if (!svgData.isEmpty()) {
+            c.svg = svgData;
+        } else if (!imageData.isEmpty()) {
+            c.raster = QImage::fromData(imageData);
+        } else if (!path.isEmpty()) {
+            const QString suffix = QFileInfo(path).suffix().toLower();
+            if (suffix == QLatin1String("svg") || suffix == QLatin1String("svgz")) {
+                QFile f(path);
+                if (f.open(QIODevice::ReadOnly))
+                    c.svg = f.readAll();
+            } else {
+                QImageReader reader(path);
+                reader.setAutoTransform(true);
+                c.raster = reader.read();
+            }
+        }
+    }
+    if (!c.svg.isEmpty()) {
+        const QString rk = recolor ? tintColor.name(QColor::HexRgb) : QString();
+        if (!c.renderer || c.rendererKey != rk) {
+            c.renderer = std::make_shared<QSvgRenderer>(recolor ? recolorSvg(c.svg, tintColor) : c.svg);
+            c.rendererKey = rk;
+            c.procKey.clear();
+        }
+        return c.renderer->isValid();
+    }
+    return !c.raster.isNull();
+}
+
+QSizeF ImageObject::sourceSizeMm(const RenderContext& ctx) const
+{
+    if (!loadSource(ctx))
+        return QSizeF();
+    return naturalSizeMm(cache().renderer.get(), cache().raster);
 }
 
 void ImageObject::paint(QPainter* p, const RenderContext& ctx) const
 {
-    QImage img;
-    if (!imageData.isEmpty()) {
-        if (m_embeddedKey.size() != imageData.size() || m_embeddedKey != imageData) {
-            m_embedded = QImage::fromData(imageData);
-            m_embeddedKey = imageData;
-        }
-        img = m_embedded;
-    } else if (!pathTemplate.isEmpty()) {
-        QString path = expandTemplate(pathTemplate, ctx);
-        if (QFileInfo(path).isRelative() && !ctx.baseDir.isEmpty())
-            path = QDir(ctx.baseDir).filePath(path);
-        if (path != m_fileKey) {
-            QImageReader reader(path);
-            reader.setAutoTransform(true);
-            m_file = reader.read();
-            m_fileKey = path;
-        }
-        img = m_file;
-    }
     const QRectF box(0, 0, w, h);
-    if (img.isNull()) {
+    if (!loadSource(ctx)) {
         if (ctx.rawTemplates || pathTemplate.isEmpty()) {
             QPen pen(QColor(150, 150, 150), 0);
             p->setPen(pen);
@@ -363,21 +508,91 @@ void ImageObject::paint(QPainter* p, const RenderContext& ctx) const
         }
         return;
     }
-    if (monochrome)
-        img = img.convertToFormat(QImage::Format_Grayscale8);
-    QRectF target = box;
-    if (keepAspect && img.width() > 0 && img.height() > 0) {
-        const double ar = double(img.width()) / img.height();
-        if (w / h > ar) {
-            const double nw = h * ar;
-            target = QRectF((w - nw) / 2, 0, nw, h);
-        } else {
-            const double nh = w / ar;
-            target = QRectF(0, (h - nh) / 2, w, nh);
-        }
+    Cache& c = cache();
+    const QSizeF natural = naturalSizeMm(c.renderer.get(), c.raster);
+    // visible part of the source, as fractions
+    const double x0 = std::clamp(cropLeft, 0.0, 100.0) / 100, y0 = std::clamp(cropTop, 0.0, 100.0) / 100;
+    const double x1 = 1 - std::clamp(cropRight, 0.0, 100.0) / 100, y1 = 1 - std::clamp(cropBottom, 0.0, 100.0) / 100;
+    if (x1 - x0 < 0.001 || y1 - y0 < 0.001 || natural.isEmpty())
+        return;
+    const QSizeF visible(natural.width() * (x1 - x0), natural.height() * (y1 - y0));
+    QSizeF size = box.size();
+    if (fit == FitContain)
+        size = visible * std::min(w / visible.width(), h / visible.height());
+    else if (fit == FitNone)
+        size = visible;
+    const QRectF target = fit == FitStretch
+                              ? box
+                              : QRectF(alignOffset(w, size.width(), hAlign), alignOffset(h, size.height(), vAlign),
+                                       size.width(), size.height());
+    // the whole source, positioned so that its visible part lands on target
+    const double fw = target.width() / (x1 - x0), fh = target.height() / (y1 - y0);
+    const QRectF full(target.x() - x0 * fw, target.y() - y0 * fh, fw, fh);
+
+    p->save();
+    p->setClipRect(box, Qt::IntersectClip);
+    if (flipH || flipV) {
+        const QPointF ctr = target.center();
+        p->translate(ctr);
+        p->scale(flipH ? -1 : 1, flipV ? -1 : 1);
+        p->translate(-ctr);
     }
-    p->setRenderHint(QPainter::SmoothPixmapTransform, true);
-    p->drawImage(target, img);
+    p->setClipRect(target, Qt::IntersectClip);
+    const double op = std::clamp(opacity, 0.0, 1.0);
+    const bool mono = ctx.monoDither && dither;
+    ImageAdjust adj;
+    adj.brightness = brightness;
+    adj.contrast = contrast;
+    adj.grayscale = monochrome;
+    if (recolor && !c.renderer)
+        adj.tint = tintColor;  // SVG is recoloured as vector in loadSource()
+
+    if (c.renderer && adj.isIdentity() && !mono) {
+        p->setOpacity(p->opacity() * op);
+        c.renderer->render(p, full);
+        p->restore();
+        return;
+    }
+
+    // raster path: SVG is rasterized at device resolution (300 dpi for PDF/screen),
+    // dithering needs the image resampled to exactly one pixel per printer dot
+    const double dpi = ctx.deviceDpi > 0 ? ctx.deviceDpi : 300;
+    QSize px;
+    if (c.renderer || mono)
+        px = QSize(std::clamp(int(std::lround(mmToDots(full.width(), dpi))), 1, 8000),
+                   std::clamp(int(std::lround(mmToDots(full.height(), dpi))), 1, 8000));
+    const QString key = c.rendererKey + QLatin1Char('|') + QString::number(brightness) + QLatin1Char('|') +
+                        QString::number(contrast) + QLatin1Char('|') + QString::number(int(monochrome)) +
+                        QLatin1Char('|') + (adj.tint.isValid() ? adj.tint.name(QColor::HexArgb) : QString()) +
+                        QLatin1Char('|') + (mono ? QString::number(op) : QStringLiteral("-")) + QLatin1Char('|') +
+                        QString::number(px.width()) + QLatin1Char('x') + QString::number(px.height());
+    if (key != c.procKey) {
+        QImage img;
+        if (c.renderer) {
+            img = QImage(px, QImage::Format_ARGB32_Premultiplied);
+            img.fill(Qt::transparent);
+            QPainter sp(&img);
+            c.renderer->render(&sp, QRectF(QPointF(0, 0), QSizeF(px)));
+        } else {
+            img = c.raster;
+        }
+        img = applyAdjust(img, adj);
+        if (mono) {
+            if (img.size() != px)
+                img = img.scaled(px, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+            img = ditherToMono(fadeToWhite(img, op));
+        }
+        c.processed = img;
+        c.procKey = key;
+    }
+    if (mono) {
+        p->setRenderHint(QPainter::SmoothPixmapTransform, false);
+    } else {
+        p->setOpacity(p->opacity() * op);
+        p->setRenderHint(QPainter::SmoothPixmapTransform, true);
+    }
+    p->drawImage(full, c.processed);
+    p->restore();
 }
 
 QJsonObject ImageObject::toJson() const
@@ -385,10 +600,40 @@ QJsonObject ImageObject::toJson() const
     QJsonObject o = LabelObject::toJson();
     if (!imageData.isEmpty())
         o[QStringLiteral("png")] = QString::fromLatin1(imageData.toBase64());
+    if (!svgData.isEmpty())
+        o[QStringLiteral("svg")] = QString::fromLatin1(svgData.toBase64());
     if (!pathTemplate.isEmpty())
         o[QStringLiteral("path")] = pathTemplate;
-    o[QStringLiteral("keepAspect")] = keepAspect;
+    o[QStringLiteral("fit")] = QLatin1String(FIT_NAMES[std::clamp(fit, 0, 2)]);
+    if (hAlign != 1)
+        o[QStringLiteral("hAlign")] = hAlign;
+    if (vAlign != 1)
+        o[QStringLiteral("vAlign")] = vAlign;
+    if (cropLeft != 0)
+        o[QStringLiteral("cropLeft")] = cropLeft;
+    if (cropTop != 0)
+        o[QStringLiteral("cropTop")] = cropTop;
+    if (cropRight != 0)
+        o[QStringLiteral("cropRight")] = cropRight;
+    if (cropBottom != 0)
+        o[QStringLiteral("cropBottom")] = cropBottom;
+    if (flipH)
+        o[QStringLiteral("flipH")] = true;
+    if (flipV)
+        o[QStringLiteral("flipV")] = true;
+    if (opacity != 1.0)
+        o[QStringLiteral("opacity")] = opacity;
+    if (brightness != 0)
+        o[QStringLiteral("brightness")] = brightness;
+    if (contrast != 0)
+        o[QStringLiteral("contrast")] = contrast;
     o[QStringLiteral("monochrome")] = monochrome;
+    if (recolor)
+        o[QStringLiteral("recolor")] = true;
+    if (tintColor != QColor(Qt::black))
+        o[QStringLiteral("tint")] = colorToString(tintColor);
+    if (dither)
+        o[QStringLiteral("dither")] = true;
     return o;
 }
 
@@ -396,11 +641,33 @@ void ImageObject::fromJson(const QJsonObject& o)
 {
     LabelObject::fromJson(o);
     imageData = QByteArray::fromBase64(str(o, "png", QString()).toLatin1());
+    svgData = QByteArray::fromBase64(str(o, "svg", QString()).toLatin1());
     pathTemplate = str(o, "path", QString());
-    keepAspect = flag(o, "keepAspect", true);
+    const QString f = str(o, "fit", QString());
+    if (f == QLatin1String(FIT_NAMES[FitNone]))
+        fit = FitNone;
+    else if (f == QLatin1String(FIT_NAMES[FitStretch]))
+        fit = FitStretch;
+    else if (f == QLatin1String(FIT_NAMES[FitContain]))
+        fit = FitContain;
+    else  // files written before "fit" existed
+        fit = flag(o, "keepAspect", true) ? FitContain : FitStretch;
+    hAlign = std::clamp(int(num(o, "hAlign", 1)), 0, 2);
+    vAlign = std::clamp(int(num(o, "vAlign", 1)), 0, 2);
+    cropLeft = std::clamp(num(o, "cropLeft", 0), 0.0, 100.0);
+    cropTop = std::clamp(num(o, "cropTop", 0), 0.0, 100.0);
+    cropRight = std::clamp(num(o, "cropRight", 0), 0.0, 100.0);
+    cropBottom = std::clamp(num(o, "cropBottom", 0), 0.0, 100.0);
+    flipH = flag(o, "flipH", false);
+    flipV = flag(o, "flipV", false);
+    opacity = std::clamp(num(o, "opacity", 1.0), 0.0, 1.0);
+    brightness = std::clamp(int(num(o, "brightness", 0)), -100, 100);
+    contrast = std::clamp(int(num(o, "contrast", 0)), -100, 100);
     monochrome = flag(o, "monochrome", false);
-    m_embeddedKey.clear();
-    m_fileKey.clear();
+    recolor = flag(o, "recolor", false);
+    tintColor = colorFrom(o.value(QLatin1String("tint")), Qt::black);
+    dither = flag(o, "dither", false);
+    m_cache.reset();
 }
 
 // ================================================================ barcode

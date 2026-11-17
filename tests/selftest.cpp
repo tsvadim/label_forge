@@ -2,6 +2,7 @@
 // Self-test: exercises variables, data loaders, barcodes, templates and exports.
 // Usage: labelforge_selftest <output-dir> [test.xlsx]
 #include "barcode/Barcode.h"
+#include "core/ImageEffects.h"
 #include "core/LabelDocument.h"
 #include "core/Renderer.h"
 #include "data/DataLoader.h"
@@ -12,6 +13,7 @@
 #include <QApplication>
 #include <QDir>
 #include <QFile>
+#include <QSvgRenderer>
 #include <QTextStream>
 #include <cstdio>
 
@@ -56,6 +58,139 @@ static void testCsv()
     CHECK(parseCsv(q, QStringLiteral("auto"), true, &t, &err), "csv quoted");
     CHECK(t.rowCount() == 2 && t.rows[0][0] == QStringLiteral("x, \"y\""), "csv quotes");
     CHECK(PrintJob::parseRange(QStringLiteral("1-3, 5, 9-"), 10) == QVector<int>({0, 1, 2, 4, 8, 9}), "range");
+}
+
+static void testImageEffects()
+{
+    QImage grey(64, 64, QImage::Format_ARGB32);
+    grey.fill(qRgb(128, 128, 128));
+    const QImage d = ditherToMono(grey);
+    int black = 0, other = 0;
+    for (int y = 0; y < d.height(); ++y)
+        for (int x = 0; x < d.width(); ++x) {
+            const QRgb px = d.pixel(x, y);
+            if (px == 0xFF000000u)
+                ++black;
+            else if (px != 0xFFFFFFFFu)
+                ++other;
+        }
+    CHECK(other == 0, "dither: only black and white");
+    CHECK(black > 64 * 64 * 2 / 5 && black < 64 * 64 * 3 / 5, "dither: 50% grey ~ half black");
+    QImage clear(8, 8, QImage::Format_ARGB32);
+    clear.fill(Qt::transparent);
+    CHECK(ditherToMono(clear).pixel(3, 3) == 0u, "dither: transparent stays transparent");
+
+    QImage bw(2, 1, QImage::Format_ARGB32);
+    bw.setPixel(0, 0, qRgb(0, 0, 0));
+    bw.setPixel(1, 0, qRgb(255, 255, 255));
+    ImageAdjust tint;
+    tint.tint = QColor(200, 0, 0);
+    const QImage t = applyAdjust(bw, tint);
+    CHECK(t.pixel(0, 0) == qRgba(200, 0, 0, 255) && qAlpha(t.pixel(1, 0)) == 0, "tint: dark -> colour, light -> transparent");
+    ImageAdjust bright;
+    bright.brightness = 100;
+    CHECK(applyAdjust(grey, bright).pixel(0, 0) == qRgb(255, 255, 255), "brightness +100");
+
+    const QByteArray svg =
+        "<?xml version=\"1.0\"?>\n"
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" viewBox=\"0 0 10 10\">"
+        "<style>.a{fill:#00ff00;stroke:none}</style>"
+        "<rect class=\"a\" width=\"5\" height=\"5\"/>"
+        "<rect x=\"5\" width=\"5\" height=\"5\" fill=\"#123456\" style=\"stroke:#654321;stroke-width:1\"/>"
+        "<circle cx=\"5\" cy=\"8\" r=\"1\" fill=\"#ffffff\"/><path d=\"M0 0L1 1\" fill=\"none\"/></svg>";
+    const QByteArray rc = recolorSvg(svg, QColor(0xcc, 0x00, 0x11));
+    CHECK(!rc.contains("#00ff00") && !rc.contains("#123456") && !rc.contains("#654321"), "svg recolor: colours replaced");
+    CHECK(rc.contains("#cc0011") && rc.contains("#ffffff") && rc.contains("fill=\"none\""), "svg recolor: none/white kept");
+    CHECK(rc.contains("xmlns:xlink"), "svg recolor: namespaces kept");
+    CHECK(QSvgRenderer(rc).isValid(), "svg recolor: still valid");
+    const QByteArray gz = QByteArray::fromHex("1f8b0800");
+    CHECK(recolorSvg(gz, Qt::red) == gz && isSvgData(gz) && isSvgData(svg) && !isSvgData("\x89PNG"), "svg detection");
+}
+
+static double blackShare(const QImage& mono)
+{
+    int black = 0;
+    for (int y = 0; y < mono.height(); ++y)
+        for (int x = 0; x < mono.width(); ++x)
+            black += mono.pixelIndex(x, y) == 1;
+    return double(black) / (mono.width() * mono.height());
+}
+
+static void testImageObject(const QDir& out)
+{
+    // JSON: all new fields survive a round trip, old files keep their meaning
+    ImageObject im;
+    CHECK(im.dither, "image: new objects dither by default");
+    im.setEmbeddedSvg("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"/>");
+    im.fit = ImageObject::FitNone;
+    im.hAlign = 2;
+    im.vAlign = 0;
+    im.cropLeft = 10;
+    im.cropBottom = 5.5;
+    im.flipH = true;
+    im.opacity = 0.5;
+    im.brightness = -20;
+    im.contrast = 30;
+    im.recolor = true;
+    im.tintColor = QColor(10, 20, 30);
+    auto copy = LabelObject::fromJsonAny(im.toJson());
+    auto* ic = dynamic_cast<ImageObject*>(copy.get());
+    CHECK(ic && ic->svgData == im.svgData && ic->fit == ImageObject::FitNone && ic->hAlign == 2 && ic->vAlign == 0 &&
+              ic->cropLeft == 10 && ic->cropBottom == 5.5 && ic->flipH && !ic->flipV && ic->opacity == 0.5 &&
+              ic->brightness == -20 && ic->contrast == 30 && ic->recolor && ic->tintColor == QColor(10, 20, 30) &&
+              ic->dither,
+          "image: json round trip");
+    QJsonObject old;
+    old[QStringLiteral("type")] = QStringLiteral("image");
+    old[QStringLiteral("keepAspect")] = false;
+    auto oldObj = LabelObject::fromJsonAny(old);
+    auto* io = dynamic_cast<ImageObject*>(oldObj.get());
+    CHECK(io && io->fit == ImageObject::FitStretch && !io->dither && io->hAlign == 1, "image: old file compatibility");
+
+    // SVG grey square: threshold prints solid black, dithering prints a halftone
+    const QByteArray greySvg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\">"
+                               "<rect width=\"20\" height=\"20\" fill=\"#777777\"/></svg>";
+    LabelDocument doc;
+    doc.label.width = 20;
+    doc.label.height = 20;
+    auto img = std::make_unique<ImageObject>();
+    img->setEmbeddedSvg(greySvg);
+    img->w = 20;
+    img->h = 20;
+    img->fit = ImageObject::FitStretch;
+    ImageObject* ip = img.get();
+    doc.objects.push_back(std::move(img));
+    RenderContext ctx;
+    const double dithered = blackShare(renderLabelImage(doc, ctx, 203, true));
+    ip->dither = false;
+    const double threshold = blackShare(renderLabelImage(doc, ctx, 203, true));
+    CHECK(dithered > 0.3 && dithered < 0.7, "image: dithered svg is a halftone");
+    CHECK(threshold > 0.95, "image: threshold svg is solid");
+    QString err;
+    const DataTable noData;
+    PrintJob job(doc, noData, doc.print);
+    CHECK(job.exportPdf(out.filePath(QStringLiteral("image_svg.pdf")), &err), "image: svg to pdf");
+
+    // recolour + flip + crop on screen rendering
+    ip->recolor = true;
+    ip->tintColor = QColor(255, 0, 0);
+    QImage c = renderLabelImage(doc, ctx, 100, false);
+    CHECK(c.pixelColor(c.width() / 2, c.height() / 2) == QColor(255, 0, 0), "image: svg recoloured");
+    QImage halves(20, 2, QImage::Format_ARGB32);  // left half black, right half white
+    halves.fill(Qt::white);
+    for (int x = 0; x < 10; ++x)
+        for (int y = 0; y < 2; ++y)
+            halves.setPixel(x, y, qRgb(0, 0, 0));
+    ip->setEmbedded(halves);
+    ip->recolor = false;
+    ip->flipH = true;
+    c = renderLabelImage(doc, ctx, 100, false);
+    CHECK(qGray(c.pixel(5, 40)) > 200 && qGray(c.pixel(c.width() - 5, 40)) < 50, "image: flipped");
+    ip->flipH = false;
+    ip->cropRight = 50;
+    c = renderLabelImage(doc, ctx, 100, false);
+    CHECK(qGray(c.pixel(c.width() - 5, 40)) < 50, "image: cropped to the black half");
+    c.save(out.filePath(QStringLiteral("image_crop.png")));
 }
 
 static void testXlsx(const QString& path, QTextStream& log)
@@ -138,8 +273,10 @@ int main(int argc, char** argv)
 
     testVariables();
     testCsv();
+    testImageEffects();
     if (argc > 2)
         testXlsx(QString::fromLocal8Bit(argv[2]), log);
+    testImageObject(out);
 
     QFile mf(out.filePath(QStringLiteral("barcodes.tsv")));
     mf.open(QIODevice::WriteOnly | QIODevice::Truncate);
