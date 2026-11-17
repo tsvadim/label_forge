@@ -45,6 +45,9 @@ private:
     QDoubleSpinBox* spin(double min, double max, int decimals, double step, const QString& suffix,
                          std::function<double()> get, std::function<void(double)> set);
     QWidget* fieldMenuButton(std::function<void(const QString&)> insert);
+    // Colour button plus, when prop is set, a "{}" button binding the colour to a data field.
+    QWidget* colorRow(LabelObject* o, const QString& prop, class QColor* target, bool allowNone,
+                      const QString& editKey);
     void edited(LabelObject* o, const QString& key);
     void rebuildLater();
 

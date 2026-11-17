@@ -23,11 +23,13 @@
 #include <QDockWidget>
 #include <QDropEvent>
 #include <QListWidget>
+#include <QMenu>
 #include <QFile>
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QScrollBar>
 #include <QStatusBar>
+#include <QToolButton>
 #include <QWindow>
 #include <QTest>
 #include <QUndoStack>
@@ -344,6 +346,32 @@ int main(int argc, char** argv)
             shot(panel, out, QStringLiteral("10_shape_props"));
             panel->verticalScrollBar()->setValue(panel->verticalScrollBar()->maximum() / 2);
             shot(panel, out, QStringLiteral("11_shape_props_middle"));
+
+            // bind the fill colour to a data field through the "{}" button
+            auto* bind = panel->findChild<QToolButton*>(QStringLiteral("colorField-fill"));
+            CHECK(bind && bind->menu(), "fill colour has a field binding button");
+            if (bind && bind->menu()) {
+                emit bind->menu()->aboutToShow();
+                QAction* field = nullptr;
+                for (QAction* a : bind->menu()->actions())
+                    if (a->text().startsWith(QLatin1Char('{')) && !field)
+                        field = a;
+                CHECK(field != nullptr, "binding menu lists the data fields");
+                if (field) {
+                    const QString t = field->text();
+                    const int idx = undo->index();
+                    field->trigger();
+                    settle();
+                    CHECK(sh->colorFields.value(QStringLiteral("fill")) == t && bind->statusTip() == t,
+                          "fill colour bound to a field");
+                    CHECK(undo->index() == idx + 1, "binding is one undo step");
+                    shot(panel, out, QStringLiteral("12_color_field"));
+                    undo->undo();
+                    settle();
+                    auto* back = scene->document()->objects.back().get();
+                    CHECK(back->colorFields.isEmpty(), "undo removes the binding");
+                }
+            }
         }
         undo->undo();
         settle();

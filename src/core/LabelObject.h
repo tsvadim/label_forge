@@ -3,6 +3,7 @@
 
 #include <QByteArray>
 #include <QColor>
+#include <QHash>
 #include <QImage>
 #include <QJsonObject>
 #include <QPainterPath>
@@ -58,6 +59,14 @@ public:
     QColor shadowColor = Qt::black;
     double shadowOpacity = 0.6;
     double shadowBlur = 0;  // mm, 0 = sharp (stays vector)
+
+    // Colours taken from a data field: property key ("color", "fill",
+    // "stroke", "tint") -> template such as "{Colour}". An empty or invalid
+    // value, and the design view, keep the object's own colour.
+    QHash<QString, QString> colorFields;
+    QColor boundColor(const QString& key, const QColor& own, const RenderContext& ctx) const;
+    // #RGB, #RRGGBB, #AARRGGBB (also without '#') or an SVG colour name.
+    static QColor parseColor(const QString& s, const QColor& fallback);
 
 private:
     void paintShadow(QPainter* p, const RenderContext& ctx) const;

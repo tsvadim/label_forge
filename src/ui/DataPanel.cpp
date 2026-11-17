@@ -2,6 +2,7 @@
 #include "DataPanel.h"
 
 #include "Icons.h"
+#include "core/RemoteImage.h"
 
 #include <QCheckBox>
 #include <QHBoxLayout>
@@ -168,8 +169,20 @@ void DataPanel::rebuildTable()
     const int maxRows = std::min(m_table.rowCount(), 100000);
     for (int r = 0; r < maxRows; ++r) {
         const QStringList& row = m_table.rows.at(r);
-        for (int c = 0; c < m_table.columns.size(); ++c)
-            m_view->setItem(r, c, new QTableWidgetItem(row.value(c)));
+        for (int c = 0; c < m_table.columns.size(); ++c) {
+            const QString v = row.value(c);
+            auto* it = new QTableWidgetItem;
+            if (remote::isDataUri(v)) {
+                // an embedded picture (database BLOB): a short note instead of base64
+                it->setData(Qt::UserRole, v);
+                it->setText(tr("[изображение, %1 КБ]").arg(std::max<qint64>(1, remote::dataUriSize(v) / 1024)));
+                it->setToolTip(remote::dataUriMime(v));
+                it->setFlags(it->flags() & ~Qt::ItemIsEditable);
+            } else {
+                it->setText(v);
+            }
+            m_view->setItem(r, c, it);
+        }
     }
     m_view->resizeColumnsToContents();
     for (int c = 0; c < m_view->columnCount(); ++c)
@@ -197,7 +210,8 @@ DataTable DataPanel::tableFromWidget() const
         QStringList row;
         for (int c = 0; c < m_view->columnCount(); ++c) {
             const QTableWidgetItem* it = m_view->item(r, c);
-            row << (it ? it->text() : QString());
+            const QVariant raw = it ? it->data(Qt::UserRole) : QVariant();
+            row << (raw.isValid() ? raw.toString() : it ? it->text() : QString());
         }
         t.rows << row;
     }

@@ -13,7 +13,7 @@ cmake -S qtbase -B qtbuild -G Ninja -DCMAKE_TOOLCHAIN_FILE="$SRC/packaging/mingw
   -DQT_HOST_PATH=/usr -DQT_HOST_PATH_CMAKE_DIR=/usr/lib/x86_64-linux-gnu/cmake \
   -DCMAKE_INSTALL_PREFIX="$QT_WIN_PREFIX" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
   -DQT_BUILD_EXAMPLES=OFF -DQT_BUILD_TESTS=OFF -DFEATURE_static_runtime=ON -DFEATURE_opengl=OFF -DINPUT_opengl=no \
-  -DFEATURE_dbus=OFF -DFEATURE_network=OFF -DFEATURE_sql_odbc=ON -DFEATURE_sql_sqlite=OFF -DFEATURE_concurrent=OFF \
+  -DFEATURE_dbus=OFF -DFEATURE_network=ON -DFEATURE_schannel=ON -DFEATURE_sql_odbc=ON -DFEATURE_sql_sqlite=OFF -DFEATURE_concurrent=OFF \
   -DFEATURE_testlib=OFF -DFEATURE_vulkan=OFF -DFEATURE_system_zlib=OFF -DFEATURE_system_pcre2=OFF \
   -DFEATURE_system_harfbuzz=OFF -DFEATURE_system_freetype=OFF
 cmake --build qtbuild --parallel && cmake --install qtbuild

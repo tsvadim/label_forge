@@ -19,6 +19,7 @@
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QImageReader>
+#include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
@@ -159,6 +160,76 @@ QWidget* PropertyPanel::fieldMenuButton(std::function<void(const QString&)> inse
     }
     b->setMenu(menu);
     return b;
+}
+
+QWidget* PropertyPanel::colorRow(LabelObject* o, const QString& prop, QColor* target, bool allowNone,
+                                  const QString& editKey)
+{
+    auto* btn = new ColorButton(*target, allowNone, [this, o, target, editKey](const QColor& c) {
+        *target = c;
+        edited(o, editKey);
+    });
+    if (prop.isEmpty())
+        return btn;
+    auto* w = new QWidget;
+    auto* l = new QHBoxLayout(w);
+    l->setContentsMargins(0, 0, 0, 0);
+    l->setSpacing(4);
+    l->addWidget(btn);
+    auto* bind = new QToolButton;
+    bind->setObjectName(QStringLiteral("colorField-") + prop);
+    bind->setPopupMode(QToolButton::InstantPopup);
+    auto refresh = [o, prop, bind, btn] {
+        const QString t = o->colorFields.value(prop);
+        QFont f = bind->font();
+        f.setBold(!t.isEmpty());
+        bind->setFont(f);
+        // long field names are elided, the panel is often narrow
+        bind->setText(t.isEmpty() ? QStringLiteral("{}") : QFontMetrics(f).elidedText(t, Qt::ElideMiddle, 70));
+        bind->setStatusTip(t);
+        const QString help = tr("Брать цвет из поля данных: #RRGGBB, #AARRGGBB или имя (red, navy).\n"
+                                "Пустое или неверное значение — цвет объекта.");
+        bind->setToolTip(t.isEmpty() ? help : tr("Цвет из %1").arg(t) + QStringLiteral("\n\n") + help);
+        btn->setToolTip(t.isEmpty() ? QString() : tr("При печати цвет берётся из %1").arg(t));
+    };
+    auto set = [this, o, prop, refresh](const QString& t) {
+        if (t.isEmpty())
+            o->colorFields.remove(prop);
+        else
+            o->colorFields.insert(prop, t);
+        refresh();
+        edited(o, QStringLiteral("colorField-") + prop);
+    };
+    auto* menu = new QMenu(bind);
+    connect(menu, &QMenu::aboutToShow, bind, [this, menu, o, prop, set, bind] {
+        menu->clear();
+        const QString cur = o->colorFields.value(prop);
+        if (m_fields.isEmpty()) {
+            menu->addAction(tr("Нет полей данных"))->setEnabled(false);
+        } else {
+            menu->addSection(tr("Цвет из поля"));
+            for (const QString& f : m_fields) {
+                const QString t = QStringLiteral("{%1}").arg(f);
+                QAction* a = menu->addAction(t, bind, [set, t] { set(t); });
+                a->setCheckable(true);
+                a->setChecked(cur == t);
+            }
+        }
+        menu->addSeparator();
+        menu->addAction(tr("Шаблон вручную…"), bind, [this, set, cur] {
+            bool ok = false;
+            const QString t = QInputDialog::getText(this, tr("Цвет из данных"),
+                                                    tr("Шаблон, например {Цвет}:"), QLineEdit::Normal, cur, &ok);
+            if (ok)
+                set(t.trimmed());
+        });
+        menu->addAction(tr("Не привязывать"), bind, [set] { set(QString()); })->setEnabled(!cur.isEmpty());
+    });
+    bind->setMenu(menu);
+    refresh();
+    l->addWidget(bind);
+    l->addStretch();
+    return w;
 }
 
 void PropertyPanel::build()
@@ -372,14 +443,8 @@ void PropertyPanel::buildText(QFormLayout* f, TextObject* t)
     addStyle(tr("Ч"), t->underline, QStringLiteral("underline"), [t](bool v) { t->underline = v; });
     sl->addStretch();
     f->addRow(tr("Стиль:"), styleRow);
-    f->addRow(tr("Цвет:"), new ColorButton(t->color, false, [this, t](const QColor& c) {
-                  t->color = c;
-                  edited(t, QStringLiteral("color"));
-              }));
-    f->addRow(tr("Заливка:"), new ColorButton(t->fill, true, [this, t](const QColor& c) {
-                  t->fill = c;
-                  edited(t, QStringLiteral("fill"));
-              }));
+    f->addRow(tr("Цвет:"), colorRow(t, QStringLiteral("color"), &t->color, false, QStringLiteral("color")));
+    f->addRow(tr("Заливка:"), colorRow(t, QStringLiteral("fill"), &t->fill, true, QStringLiteral("fill")));
 
     f->addRow(section(tr("Абзац")));
     auto* ha = new QComboBox;
@@ -446,10 +511,9 @@ void PropertyPanel::buildShape(QFormLayout* f, ShapeObject* s)
         return c;
     };
     auto color = [this, f, s](const QString& label, QColor* target, bool allowNone, const QString& key) {
-        f->addRow(label, new ColorButton(*target, allowNone, [this, s, target, key](const QColor& c) {
-                      *target = c;
-                      edited(s, key);
-                  }));
+        // the second gradient / pattern colour cannot be bound to a field
+        const bool bindable = key == QLatin1String("stroke") || key == QLatin1String("fill");
+        f->addRow(label, colorRow(s, bindable ? key : QString(), target, allowNone, key));
     };
 
     if (auto* ps = dynamic_cast<PolyShapeObject*>(s)) {
@@ -603,10 +667,7 @@ void PropertyPanel::buildShadow(QFormLayout* f, LabelObject* o)
 
 void PropertyPanel::buildLine(QFormLayout* f, LineObject* l)
 {
-    f->addRow(tr("Цвет:"), new ColorButton(l->color, false, [this, l](const QColor& c) {
-                  l->color = c;
-                  edited(l, QStringLiteral("color"));
-              }));
+    f->addRow(tr("Цвет:"), colorRow(l, QStringLiteral("color"), &l->color, false, QStringLiteral("color")));
     f->addRow(tr("Толщина:"), spin(0.05, 20, 2, 0.1, tr(" мм"), [l] { return l->width; }, [this, l](double v) {
                   l->width = v;
                   edited(l, QStringLiteral("lineWidth"));
@@ -794,10 +855,7 @@ void PropertyPanel::buildImage(QFormLayout* f, ImageObject* im)
                           [im](bool v) { im->recolor = v; });
     recolor->setToolTip(tr("Для одноцветных значков. SVG: все цвета, кроме белого, заменяются выбранным.\n"
                            "Растр: тёмные части получают выбранный цвет, светлые становятся прозрачными."));
-    f->addRow(tr("Цвет значка:"), new ColorButton(im->tintColor, false, [this, im](const QColor& c) {
-                  im->tintColor = c;
-                  edited(im, QStringLiteral("tint"));
-              }));
+    f->addRow(tr("Цвет значка:"), colorRow(im, QStringLiteral("tint"), &im->tintColor, false, QStringLiteral("tint")));
     check(tr("Дизеринг на термопринтере"), im->dither, QStringLiteral("dither"),
           [im](bool v) { im->dither = v; })
         ->setToolTip(tr("При прямой печати ZPL/TSPL фото и оттенки передаются точечным узором.\n"

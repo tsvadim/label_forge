@@ -2,6 +2,7 @@
 #include "DataLoader.h"
 
 #include "Inflate.h"
+#include "core/RemoteImage.h"
 
 #include <QCoreApplication>
 #include <QDate>
@@ -602,8 +603,17 @@ bool loadData(const DataSourceConfig& cfg, const QString& baseDir, DataTable* ou
                         out->columns << rec.fieldName(i);
                     while (q.next()) {
                         QStringList row;
-                        for (int i = 0; i < rec.count(); ++i)
-                            row << q.value(i).toString();
+                        for (int i = 0; i < rec.count(); ++i) {
+                            const QVariant v = q.value(i);
+                            // binary columns (pictures stored as BLOBs) become data: URIs
+                            // that an image object with the path {Field} can draw
+                            if (v.typeId() == QMetaType::QByteArray) {
+                                const QByteArray b = v.toByteArray();
+                                row << (b.isEmpty() ? QString() : remote::makeDataUri(b));
+                            } else {
+                                row << v.toString();
+                            }
+                        }
                         out->rows << row;
                     }
                     ok = true;

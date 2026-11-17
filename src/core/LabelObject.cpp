@@ -2,6 +2,7 @@
 #include "LabelObject.h"
 
 #include "ImageEffects.h"
+#include "RemoteImage.h"
 #include "RenderContext.h"
 #include "ShapePaths.h"
 #include "TextLayout.h"
@@ -16,6 +17,7 @@
 #include <QJsonDocument>
 #include <QPainter>
 #include <QPainterPathStroker>
+#include <QRegularExpression>
 #include <QSvgRenderer>
 #include <algorithm>
 #include <cmath>
@@ -103,6 +105,12 @@ QJsonObject LabelObject::toJson() const
             s[QStringLiteral("blur")] = shadowBlur;
         o[QStringLiteral("shadow")] = s;
     }
+    QJsonObject cf;
+    for (auto it = colorFields.cbegin(); it != colorFields.cend(); ++it)
+        if (!it.value().isEmpty())
+            cf[it.key()] = it.value();
+    if (!cf.isEmpty())
+        o[QStringLiteral("colorFields")] = cf;
     return o;
 }
 
@@ -124,6 +132,33 @@ void LabelObject::fromJson(const QJsonObject& o)
     shadowColor = colorFrom(s.value(QLatin1String("color")), Qt::black);
     shadowOpacity = std::clamp(num(s, "opacity", 0.6), 0.0, 1.0);
     shadowBlur = std::clamp(num(s, "blur", 0), 0.0, 20.0);
+    colorFields.clear();
+    const QJsonObject cf = o.value(QLatin1String("colorFields")).toObject();
+    for (auto it = cf.begin(); it != cf.end(); ++it)
+        if (!it.value().toString().isEmpty())
+            colorFields.insert(it.key(), it.value().toString());
+}
+
+QColor LabelObject::parseColor(const QString& s, const QColor& fallback)
+{
+    QString v = s.trimmed();
+    if (v.isEmpty())
+        return fallback;
+    static const QRegularExpression bareHex(QStringLiteral("^[0-9A-Fa-f]{3}([0-9A-Fa-f]{3}([0-9A-Fa-f]{2})?)?$"));
+    if (bareHex.match(v).hasMatch())
+        v.prepend(QLatin1Char('#'));
+    const QColor c = QColor::fromString(v);
+    return c.isValid() ? c : fallback;
+}
+
+QColor LabelObject::boundColor(const QString& key, const QColor& own, const RenderContext& ctx) const
+{
+    if (ctx.rawTemplates)
+        return own;
+    const auto it = colorFields.constFind(key);
+    if (it == colorFields.cend() || it.value().isEmpty())
+        return own;
+    return parseColor(expandTemplate(it.value(), ctx), own);
 }
 
 void LabelObject::draw(QPainter* p, const RenderContext& ctx) const
@@ -217,20 +252,21 @@ QString TextObject::displayType() const { return tr("Текст"); }
 
 void TextObject::paint(QPainter* p, const RenderContext& ctx) const
 {
-    if (fill.alpha() > 0)
-        p->fillRect(QRectF(0, 0, w, h), fill);
+    const QColor bg = boundColor(QStringLiteral("fill"), fill, ctx);
+    if (bg.alpha() > 0)
+        p->fillRect(QRectF(0, 0, w, h), bg);
     const QPainterPath& path = textPath(ctx);
     if (path.isEmpty())
         return;
     p->setPen(Qt::NoPen);
-    p->setBrush(color);
+    p->setBrush(boundColor(QStringLiteral("color"), color, ctx));
     p->drawPath(path);
 }
 
 QPainterPath TextObject::silhouette(const RenderContext& ctx) const
 {
     QPainterPath s = textPath(ctx);
-    if (fill.alpha() > 0) {
+    if (boundColor(QStringLiteral("fill"), fill, ctx).alpha() > 0) {
         s = QPainterPath();
         s.addRect(QRectF(0, 0, w, h));
     }
@@ -390,7 +426,8 @@ void ShapeObject::paint(QPainter* p, const RenderContext& ctx) const
 {
     shapes::FillStyle fs;
     fs.type = fillType;
-    fs.color = fill;
+    fs.color = boundColor(QStringLiteral("fill"), fill, ctx);
+    const QColor stroke = boundColor(QStringLiteral("stroke"), this->stroke, ctx);
     fs.color2 = fill2;
     fs.angle = gradientAngle;
     fs.pattern = pattern;
@@ -414,9 +451,10 @@ void ShapeObject::paint(QPainter* p, const RenderContext& ctx) const
     p->fillPath(frameRegionCached(), stroke);
 }
 
-QPainterPath ShapeObject::silhouette(const RenderContext&) const
+QPainterPath ShapeObject::silhouette(const RenderContext& ctx) const
 {
-    const bool hasStroke = strokeWidth > 0 && stroke.alpha() > 0;
+    const bool hasStroke = strokeWidth > 0 && boundColor(QStringLiteral("stroke"), stroke, ctx).alpha() > 0;
+    const QColor fill = boundColor(QStringLiteral("fill"), this->fill, ctx);
     if (fillType != shapes::FillNone && !(fillType == shapes::FillSolid && fill.alpha() == 0))
         return outline(0);
     if (!hasStroke)
@@ -570,8 +608,9 @@ QPainterPath LineObject::capPath(int cap, bool atEnd) const
     return path;
 }
 
-void LineObject::paint(QPainter* p, const RenderContext&) const
+void LineObject::paint(QPainter* p, const RenderContext& ctx) const
 {
+    const QColor color = boundColor(QStringLiteral("color"), this->color, ctx);
     QPen pen(color, width);
     pen.setStyle(Qt::PenStyle(qBound(1, penStyle, 5)));
     pen.setCapStyle(Qt::FlatCap);
@@ -760,10 +799,17 @@ bool ImageObject::loadSource(const RenderContext& ctx) const
     } else if (!imageData.isEmpty()) {
         key = QStringLiteral("png:%1:%2").arg(qHash(imageData)).arg(imageData.size());
     } else if (!pathTemplate.isEmpty()) {
-        path = expandTemplate(pathTemplate, ctx);
-        if (QFileInfo(path).isRelative() && !ctx.baseDir.isEmpty())
-            path = QDir(ctx.baseDir).filePath(path);
-        key = QStringLiteral("file:") + path;
+        path = expandTemplate(pathTemplate, ctx).trimmed();
+        if (remote::isDataUri(path)) {
+            // a BLOB field or an inline base64 image: key by hash, the value may be large
+            key = QStringLiteral("data:%1:%2").arg(qHash(path)).arg(path.size());
+        } else if (remote::isWebUrl(path)) {
+            key = QStringLiteral("url:") + path;
+        } else {
+            if (QFileInfo(path).isRelative() && !ctx.baseDir.isEmpty() && !path.isEmpty())
+                path = QDir(ctx.baseDir).filePath(path);
+            key = QStringLiteral("file:") + path;
+        }
     }
     if (key != c.srcKey) {
         c = Cache();
@@ -772,6 +818,19 @@ bool ImageObject::loadSource(const RenderContext& ctx) const
             c.svg = svgData;
         } else if (!imageData.isEmpty()) {
             c.raster = QImage::fromData(imageData);
+        } else if (remote::isDataUri(path) || remote::isWebUrl(path)) {
+            const QByteArray bytes =
+                remote::isDataUri(path) ? remote::decodeDataUri(path) : remote::fetchUrl(path);
+            if (remote::looksLikeSvg(bytes)) {
+                c.svg = bytes;
+            } else {
+                QBuffer buf;
+                buf.setData(bytes);
+                buf.open(QIODevice::ReadOnly);
+                QImageReader reader(&buf);
+                reader.setAutoTransform(true);
+                c.raster = reader.read();
+            }
         } else if (!path.isEmpty()) {
             const QString suffix = QFileInfo(path).suffix().toLower();
             if (suffix == QLatin1String("svg") || suffix == QLatin1String("svgz")) {
@@ -786,9 +845,10 @@ bool ImageObject::loadSource(const RenderContext& ctx) const
         }
     }
     if (!c.svg.isEmpty()) {
-        const QString rk = recolor ? tintColor.name(QColor::HexRgb) : QString();
+        const QColor tint = boundColor(QStringLiteral("tint"), tintColor, ctx);
+        const QString rk = recolor ? tint.name(QColor::HexRgb) : QString();
         if (!c.renderer || c.rendererKey != rk) {
-            c.renderer = std::make_shared<QSvgRenderer>(recolor ? recolorSvg(c.svg, tintColor) : c.svg);
+            c.renderer = std::make_shared<QSvgRenderer>(recolor ? recolorSvg(c.svg, tint) : c.svg);
             c.rendererKey = rk;
             c.procKey.clear();
         }
@@ -855,7 +915,7 @@ void ImageObject::paint(QPainter* p, const RenderContext& ctx) const
     adj.contrast = contrast;
     adj.grayscale = monochrome;
     if (recolor && !c.renderer)
-        adj.tint = tintColor;  // SVG is recoloured as vector in loadSource()
+        adj.tint = boundColor(QStringLiteral("tint"), tintColor, ctx);  // SVG is recoloured as vector in loadSource()
 
     if (c.renderer && adj.isIdentity() && !mono) {
         p->setOpacity(p->opacity() * op);

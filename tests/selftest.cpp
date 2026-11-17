@@ -4,6 +4,7 @@
 #include "barcode/Barcode.h"
 #include "core/ImageEffects.h"
 #include "core/LabelDocument.h"
+#include "core/RemoteImage.h"
 #include "core/Renderer.h"
 #include "core/ShapePaths.h"
 #include "data/DataLoader.h"
@@ -12,13 +13,21 @@
 #include "templates/TemplateLibrary.h"
 
 #include <QApplication>
+#include <QBuffer>
+#include <QElapsedTimer>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QPainter>
 #include <QSvgRenderer>
 #include <QTextStream>
+#include <atomic>
+#include <condition_variable>
 #include <cstdio>
+#include <mutex>
+#include <thread>
 
 using namespace lf;
 
@@ -204,6 +213,198 @@ static bool dark(const QImage& img, double xmm, double ymm, double pxPerMm = 10)
 static bool light(const QImage& img, double xmm, double ymm, double pxPerMm = 10)
 {
     return qGray(img.pixel(int(xmm * pxPerMm), int(ymm * pxPerMm))) > 200;
+}
+
+// Minimal HTTP server on 127.0.0.1 for the URL image test. Runs in its own
+// thread with the blocking socket API, because fetchUrl() blocks the caller.
+class TinyHttp {
+public:
+    explicit TinyHttp(QByteArray png) : m_png(std::move(png))
+    {
+        m_thread = std::thread([this] { run(); });
+        std::unique_lock<std::mutex> lock(m_mx);
+        m_cv.wait(lock, [this] { return m_port >= 0; });
+    }
+    ~TinyHttp()
+    {
+        m_stop = true;
+        m_thread.join();
+    }
+    QString url(const char* path) const
+    {
+        return QStringLiteral("http://127.0.0.1:%1%2").arg(m_port).arg(QLatin1String(path));
+    }
+    int requests() const { return m_requests; }
+
+private:
+    void run()
+    {
+        QTcpServer server;
+        const bool ok = server.listen(QHostAddress::LocalHost, 0);
+        {
+            std::lock_guard<std::mutex> lock(m_mx);
+            m_port = ok ? server.serverPort() : 0;
+        }
+        m_cv.notify_all();
+        while (ok && !m_stop) {
+            if (!server.waitForNewConnection(50))
+                continue;
+            QTcpSocket* sock = server.nextPendingConnection();
+            QByteArray req;
+            while (!req.contains("\r\n\r\n") && sock->waitForReadyRead(2000))
+                req += sock->readAll();
+            ++m_requests;
+            const QByteArray path = req.split(' ').value(1);
+            QByteArray resp;
+            if (path == "/red.png")
+                resp = "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: " +
+                       QByteArray::number(m_png.size()) + "\r\nConnection: close\r\n\r\n" + m_png;
+            else if (path == "/moved")
+                resp = "HTTP/1.1 302 Found\r\nLocation: /red.png\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            else
+                resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            sock->write(resp);
+            sock->waitForBytesWritten(2000);
+            sock->disconnectFromHost();
+            if (sock->state() != QAbstractSocket::UnconnectedState)
+                sock->waitForDisconnected(1000);
+            delete sock;
+        }
+    }
+    QByteArray m_png;
+    std::thread m_thread;
+    std::mutex m_mx;
+    std::condition_variable m_cv;
+    int m_port = -1;
+    std::atomic<bool> m_stop{false};
+    std::atomic<int> m_requests{0};
+};
+
+// Colours from data fields, data: URI and URL images, BLOB helpers.
+static void testDataBinding(const QDir& out)
+{
+    // colour parsing
+    CHECK(LabelObject::parseColor(QStringLiteral("#ff0000"), Qt::black) == QColor(255, 0, 0), "color: #RRGGBB");
+    CHECK(LabelObject::parseColor(QStringLiteral(" 0f0 "), Qt::black) == QColor(0, 255, 0), "color: bare #RGB");
+    CHECK(LabelObject::parseColor(QStringLiteral("#800000ff"), Qt::black) == QColor(0, 0, 255, 128), "color: #AARRGGBB");
+    CHECK(LabelObject::parseColor(QStringLiteral("navy"), Qt::black) == QColor(0, 0, 128), "color: svg name");
+    CHECK(LabelObject::parseColor(QStringLiteral("красный"), Qt::red) == QColor(Qt::red), "color: invalid -> own");
+    CHECK(LabelObject::parseColor(QString(), Qt::blue) == QColor(Qt::blue), "color: empty -> own");
+
+    // JSON: bindings survive, unbound objects stay as before
+    {
+        RectObject r;
+        r.colorFields.insert(QStringLiteral("fill"), QStringLiteral("{Цвет}"));
+        auto c = LabelObject::fromJsonAny(r.toJson());
+        CHECK(c && c->colorFields.value(QStringLiteral("fill")) == QStringLiteral("{Цвет}") && c->toJson() == r.toJson(),
+              "color: binding json round trip");
+        CHECK(!RectObject().toJson().contains(QStringLiteral("colorFields")), "color: no key without bindings");
+    }
+
+    // rendering with a record: rect fill and line colour (254 dpi = 10 px/mm)
+    const QStringList cols = {QStringLiteral("Цвет"), QStringLiteral("Фото")};
+    QStringList vals = {QStringLiteral("#00c000"), QString()};
+    RenderContext ctx;
+    ctx.columns = &cols;
+    ctx.values = &vals;
+    LabelDocument doc;
+    doc.label.width = 30;
+    doc.label.height = 20;
+    {
+        auto r = std::make_unique<RectObject>();
+        r->x = 0, r->y = 0, r->w = 10, r->h = 10;
+        r->strokeWidth = 0;
+        r->fillType = shapes::FillSolid;
+        r->fill = Qt::black;
+        r->colorFields.insert(QStringLiteral("fill"), QStringLiteral("{Цвет}"));
+        doc.objects.push_back(std::move(r));
+        auto l = std::make_unique<LineObject>();
+        l->x = 0, l->y = 12, l->w = 10, l->h = 4;
+        l->width = 2;
+        l->colorFields.insert(QStringLiteral("color"), QStringLiteral("{Цвет}"));
+        doc.objects.push_back(std::move(l));
+    }
+    auto pix = [](const QImage& img, double xmm, double ymm) {
+        return QColor(img.pixelColor(int(xmm * 10), int(ymm * 10)).rgb());
+    };
+    QImage img = renderLabelImage(doc, ctx, 254, false);
+    CHECK(pix(img, 5, 5) == QColor(0, 192, 0), "color: rect fill from field");
+    CHECK(pix(img, 5, 14) == QColor(0, 192, 0), "color: line colour from field");
+    vals[0] = QStringLiteral("не цвет");
+    img = renderLabelImage(doc, ctx, 254, false);
+    CHECK(pix(img, 5, 5) == QColor(Qt::black) && pix(img, 5, 14) == QColor(Qt::black),
+          "color: invalid value -> own colour");
+    vals[0] = QStringLiteral("#00c000");
+    RenderContext design = ctx;
+    design.rawTemplates = true;
+    CHECK(pix(renderLabelImage(doc, design, 254, false), 5, 5) == QColor(Qt::black),
+          "color: design view shows own colour");
+
+    // data: URI images (BLOB fields)
+    QImage red(20, 20, QImage::Format_RGB32);
+    red.fill(QColor(255, 0, 0));
+    QByteArray png;
+    {
+        QBuffer b(&png);
+        b.open(QIODevice::WriteOnly);
+        red.save(&b, "PNG");
+    }
+    const QString uri = remote::makeDataUri(png);
+    CHECK(uri.startsWith(QStringLiteral("data:image/png;base64,")), "blob: png data uri");
+    CHECK(remote::decodeDataUri(uri) == png && remote::dataUriMime(uri) == QStringLiteral("image/png"), "blob: decode");
+    CHECK(std::abs(remote::dataUriSize(uri) - png.size()) <= 2, "blob: size estimate");
+    CHECK(remote::sniffMime(QByteArray("\xFF\xD8\xFF\xE0", 4)) == QStringLiteral("image/jpeg") &&
+              remote::sniffMime(QByteArray("<svg xmlns='x'/>")) == QStringLiteral("image/svg+xml") &&
+              remote::sniffMime(QByteArray("abc")) == QStringLiteral("application/octet-stream"),
+          "blob: mime sniffing");
+    CHECK(remote::decodeDataUri(QStringLiteral("data:,a%20b")) == QByteArray("a b"), "blob: percent-encoded uri");
+
+    LabelDocument idoc;
+    idoc.label.width = 30;
+    idoc.label.height = 10;
+    auto im = std::make_unique<ImageObject>();
+    ImageObject* imp = im.get();
+    im->x = 0, im->y = 0, im->w = 10, im->h = 10;
+    im->fit = ImageObject::FitStretch;
+    im->dither = false;
+    im->pathTemplate = QStringLiteral("{Фото}");
+    idoc.objects.push_back(std::move(im));
+    vals[1] = uri;
+    CHECK(pix(renderLabelImage(idoc, ctx, 254, false), 5, 5) == QColor(255, 0, 0), "blob: image from data uri field");
+    vals[1] = remote::makeDataUri(
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'><rect width='10' height='10' fill='#000'/></svg>");
+    imp->recolor = true;
+    imp->colorFields.insert(QStringLiteral("tint"), QStringLiteral("{Цвет}"));
+    CHECK(pix(renderLabelImage(idoc, ctx, 254, false), 5, 5) == QColor(0, 192, 0), "blob: svg data uri, tint from field");
+    imp->recolor = false;
+    imp->colorFields.clear();
+
+    // URL images from a local HTTP server
+    remote::clearCache();
+    {
+        TinyHttp http(png);
+        vals[1] = http.url("/red.png");
+        CHECK(pix(renderLabelImage(idoc, ctx, 254, false), 5, 5) == QColor(255, 0, 0), "url: image downloaded");
+        vals[1] = http.url("/moved");
+        CHECK(pix(renderLabelImage(idoc, ctx, 254, false), 5, 5) == QColor(255, 0, 0), "url: redirect followed");
+        vals[1] = http.url("/missing.png");
+        CHECK(pix(renderLabelImage(idoc, ctx, 254, false), 5, 5) == QColor(Qt::white), "url: 404 draws nothing");
+        const int before = http.requests();
+        QString err;
+        CHECK(remote::fetchUrl(http.url("/missing.png"), &err).isEmpty() && !err.isEmpty() && http.requests() == before,
+              "url: failure is cached");
+        QElapsedTimer t;
+        t.start();
+        CHECK(remote::fetchUrl(QStringLiteral("http://127.0.0.1:1/x.png"), &err).isEmpty() && !err.isEmpty() &&
+                  t.elapsed() < 9000,
+              "url: refused connection fails fast");
+        // a whole print job with the URL image
+        DataTable data;
+        data.columns = cols;
+        data.rows = {QStringList{QStringLiteral("#00c000"), http.url("/red.png")}};
+        PrintJob job(idoc, data, idoc.print);
+        CHECK(job.exportPdf(out.filePath(QStringLiteral("url_image.pdf")), &err), "url: pdf export");
+    }
 }
 
 // Shapes, frames, fills, shadows and line caps. Rendered at 254 dpi = 10 px/mm.
@@ -597,6 +798,7 @@ int main(int argc, char** argv)
     testImageObject(out);
     testClipart(out);
     testShapes(out);
+    testDataBinding(out);
 
     QFile mf(out.filePath(QStringLiteral("barcodes.tsv")));
     mf.open(QIODevice::WriteOnly | QIODevice::Truncate);
