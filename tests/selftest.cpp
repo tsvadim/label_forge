@@ -466,6 +466,95 @@ static void testIconify(const QDir& out)
           "words: gallery matching");
 }
 
+// Multi-up layouts: quick setup, objects shown in one label only, printing.
+static void testLayouts(const QDir& out)
+{
+    // as many 30x20 labels as fit on a 100x70 roll label, 2 mm apart
+    LayoutSetup ls;
+    ls.carrier = LayoutSetup::CarrierRollLabel;
+    ls.carrierW = 100;
+    ls.carrierH = 70;
+    ls.gapX = ls.gapY = 2;
+    SheetLayout l = ls.resolve(30, 20);
+    CHECK(!l.roll && l.cols == 3 && l.rows == 3 && std::abs(l.marginLeft - 3) < 1e-6 && std::abs(l.pitchX - 32) < 1e-6,
+          "layout: 3x3 of 30x20 fit on 100x70");
+    ls.fit = false;
+    ls.cols = 3;
+    ls.rows = 1;
+    l = ls.resolve(30, 20);
+    CHECK(l.perPage() == 3 && std::abs(l.marginTop - 25) < 1e-6, "layout: 3 in a row, centred");
+    LayoutSetup a4;
+    a4.carrier = LayoutSetup::CarrierA4;
+    a4.gapX = a4.gapY = 0;
+    CHECK(a4.resolve(70, 37).perPage() == 24, "layout: 24 of 70x37 on A4");
+    a4.margin = 10;
+    CHECK(a4.resolve(70, 37).cols == 2, "layout: margins taken into account");
+    LayoutSetup rollOne;
+    rollOne.carrier = LayoutSetup::CarrierRoll;
+    CHECK(rollOne.resolve(58, 40).roll, "layout: one per roll label");
+
+    // the setup and object cells survive the file; old files stay as they were
+    LabelDocument doc;
+    doc.label.width = 30;
+    doc.label.height = 20;
+    doc.print.layoutId = QStringLiteral("custom");
+    doc.print.layoutSetup = ls;
+    auto all = std::make_unique<RectObject>();
+    all->x = all->y = 0;
+    all->w = all->h = 5;
+    all->strokeWidth = 0;
+    all->fillType = shapes::FillSolid;
+    all->fill = Qt::black;
+    doc.objects.push_back(std::move(all));
+    auto second = std::make_unique<RectObject>();
+    second->x = 10;
+    second->y = 5;
+    second->w = second->h = 10;
+    second->strokeWidth = 0;
+    second->fillType = shapes::FillSolid;
+    second->fill = QColor(220, 0, 0);
+    second->cell = 2;
+    doc.objects.push_back(std::move(second));
+    LabelDocument copy;
+    QString err;
+    CHECK(copy.fromBytes(doc.toBytes(), &err) && copy.toBytes() == doc.toBytes() && copy.objects[1]->cell == 2 &&
+              copy.print.layoutSetup.cols == 3 && !copy.print.layoutSetup.fit,
+          "layout: setup and cells round trip");
+    CHECK(!LabelDocument().toBytes().contains("layoutSetup") && !LabelDocument().toBytes().contains("\"cell\""),
+          "layout: nothing new in files without it");
+
+    // one carrier: the red square only in the second label
+    DataTable none;
+    PrintSettings ps = doc.print;
+    ps.copies = 3;
+    PrintJob job(doc, none, ps);
+    CHECK(job.pageCount() == 1 && job.layout().perPage() == 3, "layout: three labels on one page");
+    QImage page(1000, 700, QImage::Format_RGB32);
+    page.fill(Qt::white);
+    {
+        QPainter p(&page);
+        p.scale(10, 10);
+        job.renderPage(&p, 0, 0);
+    }
+    page.save(out.filePath(QStringLiteral("layout_page.png")));
+    auto at = [&page](double x, double y) { return QColor(page.pixel(int(x * 10), int(y * 10))); };
+    bool shared = true, onlySecond = true;
+    for (int c = 0; c < 3; ++c) {
+        const double x0 = 3 + c * 32, y0 = 25;
+        shared = shared && at(x0 + 2.5, y0 + 2.5) == QColor(Qt::black);
+        const bool red = at(x0 + 15, y0 + 10).red() > 180 && at(x0 + 15, y0 + 10).green() < 60;
+        onlySecond = onlySecond && red == (c == 1);
+    }
+    CHECK(shared, "layout: shared object printed in every label");
+    CHECK(onlySecond, "layout: own object printed only in its label");
+    CHECK(job.exportPdf(out.filePath(QStringLiteral("layout.pdf")), &err), "layout: pdf export");
+    // single label images get the object of their place on the carrier
+    CHECK(job.exportPng(out.filePath(QStringLiteral("layout_%1.png")), 254, &err), "layout: png export");
+    const QImage l1(out.filePath(QStringLiteral("layout_1.png"))), l2(out.filePath(QStringLiteral("layout_2.png")));
+    CHECK(!l1.isNull() && !l2.isNull() && QColor(l2.pixel(150, 100)).red() > 180 && QColor(l1.pixel(150, 100)) == QColor(Qt::white),
+          "layout: png of the second label has its own object");
+}
+
 // Shapes, frames, fills, shadows and line caps. Rendered at 254 dpi = 10 px/mm.
 static void testShapes(const QDir& out)
 {
@@ -859,6 +948,7 @@ int main(int argc, char** argv)
     testShapes(out);
     testDataBinding(out);
     testIconify(out);
+    testLayouts(out);
 
     QFile mf(out.filePath(QStringLiteral("barcodes.tsv")));
     mf.open(QIODevice::WriteOnly | QIODevice::Truncate);

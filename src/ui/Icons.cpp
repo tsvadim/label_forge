@@ -247,6 +247,15 @@ QPixmap paint(const QString& name, int s)
         p.setBrush(C.paper);
         p.drawRoundedRect(QRectF(3, 7, 26, 18), 4, 4);
         drawBars(p, QRectF(8, 11, 16, 10));
+    } else if (name == QLatin1String("layout-view")) {
+        // a carrier with three labels in a row
+        p.setPen(QPen(C.ink, 1.6));
+        p.setBrush(Qt::NoBrush);
+        p.drawRect(QRectF(3, 7, 26, 18));
+        p.setPen(Qt::NoPen);
+        p.setBrush(C.accent);
+        for (int i = 0; i < 3; ++i)
+            p.drawRoundedRect(QRectF(5.5 + i * 7.5, 10, 6, 12), 1.2, 1.2);
     } else if (name == QLatin1String("clipart")) {
         // a star and a heart: ready-made pictures
         QPainterPath star;

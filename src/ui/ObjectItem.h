@@ -11,13 +11,17 @@ class LabelScene;
 
 // Scene item that displays one LabelObject and edits its geometry:
 // move, resize with eight handles and rotate with the round handle.
+// In the whole-layout view an object shared by all labels has one item per
+// label (cell); the items of one object move, resize and select together.
 class ObjectItem : public QGraphicsItem {
 public:
     enum { Type = UserType + 1 };
-    explicit ObjectItem(LabelObject* obj);
+    explicit ObjectItem(LabelObject* obj, int cell = 1, const QPointF& origin = QPointF());
 
     int type() const override { return Type; }
     LabelObject* object() const { return m_obj; }
+    int cell() const { return m_cell; }
+    QPointF origin() const { return m_origin; }  // top-left corner of the item's label in the scene
     void syncFromObject();
 
     QRectF boundingRect() const override;
@@ -44,6 +48,8 @@ private:
     void applyGeometry(double w, double h, const QPointF& topLeftInStartFrame);
 
     LabelObject* m_obj;
+    int m_cell = 1;
+    QPointF m_origin;
     int m_drag = -1;  // -1 move, 0..7 resize, 8 rotate
     bool m_internal = false;
     bool m_changed = false;

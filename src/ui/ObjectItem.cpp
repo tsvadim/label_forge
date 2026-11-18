@@ -19,7 +19,7 @@ const QColor SELECT_COLOR(33, 113, 181);
 constexpr double MIN_SIZE = 0.5;
 } // namespace
 
-ObjectItem::ObjectItem(LabelObject* obj) : m_obj(obj)
+ObjectItem::ObjectItem(LabelObject* obj, int cell, const QPointF& origin) : m_obj(obj), m_cell(cell), m_origin(origin)
 {
     setAcceptHoverEvents(true);
     syncFromObject();
@@ -34,7 +34,7 @@ void ObjectItem::syncFromObject()
     setFlags(ItemIsSelectable | ItemSendsGeometryChanges | (m_obj->locked ? GraphicsItemFlags() : ItemIsMovable));
     setTransformOriginPoint(m_obj->w / 2, m_obj->h / 2);
     setRotation(m_obj->rotation);
-    setPos(m_obj->x, m_obj->y);
+    setPos(m_origin + QPointF(m_obj->x, m_obj->y));
     m_internal = false;
     update();
 }
@@ -108,7 +108,7 @@ void ObjectItem::paint(QPainter* p, const QStyleOptionGraphicsItem*, QWidget*)
     p->save();
     p->setRenderHint(QPainter::Antialiasing, true);
     p->setRenderHint(QPainter::SmoothPixmapTransform, true);
-    m_obj->draw(p, sc->context());
+    m_obj->draw(p, sc->contextFor(m_cell));
     p->restore();
 
     const QRectF box(0, 0, m_obj->w, m_obj->h);
@@ -139,6 +139,13 @@ void ObjectItem::paint(QPainter* p, const QStyleOptionGraphicsItem*, QWidget*)
             p->setBrush(QColor(120, 120, 120));
             p->drawRect(QRectF(-hs / 2, -hs / 2, hs, hs));
         }
+    } else if (sc->isObjectSelected(m_obj)) {
+        // another copy of this object is selected: show which ones follow it
+        QPen pen(SELECT_COLOR, 0, Qt::DashLine);
+        pen.setCosmetic(true);
+        p->setPen(pen);
+        p->setBrush(QColor(SELECT_COLOR.red(), SELECT_COLOR.green(), SELECT_COLOR.blue(), 18));
+        p->drawRect(box);
     } else if (sc->showObjectFrames()) {
         QPen pen(QColor(0, 0, 0, 45), 0, Qt::DotLine);
         pen.setCosmetic(true);
@@ -151,16 +158,19 @@ void ObjectItem::paint(QPainter* p, const QStyleOptionGraphicsItem*, QWidget*)
 QVariant ObjectItem::itemChange(GraphicsItemChange change, const QVariant& value)
 {
     if (change == ItemPositionChange && !m_internal && scene()) {
-        QPointF p = value.toPointF();
-        return labelScene()->snapPoint(p);
+        // snap in the coordinates of the item's own label
+        const QPointF p = value.toPointF();
+        return labelScene()->snapPoint(p - m_origin) + m_origin;
     }
     if (change == ItemPositionHasChanged) {
-        const QPointF p = pos();
+        const QPointF p = pos() - m_origin;
         if (m_obj->x != p.x() || m_obj->y != p.y()) {
             m_obj->x = p.x();
             m_obj->y = p.y();
-            if (!m_internal && scene())
+            if (!m_internal && scene()) {
                 labelScene()->markEdited();
+                labelScene()->syncCopies(this);
+            }
         }
     }
     if (change == ItemSelectedHasChanged)
@@ -220,10 +230,11 @@ void ObjectItem::applyGeometry(double w, double h, const QPointF& tl)
     setTransformOriginPoint(c1);
     setPos(p1);
     m_internal = false;
-    m_obj->x = p1.x();
-    m_obj->y = p1.y();
+    m_obj->x = p1.x() - m_origin.x();
+    m_obj->y = p1.y() - m_origin.y();
     m_changed = true;
     update();
+    labelScene()->syncCopies(this);
 }
 
 void ObjectItem::mouseMoveEvent(QGraphicsSceneMouseEvent* e)
@@ -245,11 +256,12 @@ void ObjectItem::mouseMoveEvent(QGraphicsSceneMouseEvent* e)
         m_obj->rotation = a;
         setRotation(a);
         m_changed = true;
+        labelScene()->syncCopies(this);
         return;
     }
     QPointF sp = e->scenePos();
     if (m_obj->rotation == 0)
-        sp = labelScene()->snapPoint(sp);
+        sp = labelScene()->snapPoint(sp - m_origin) + m_origin;
     const QPointF p = m_startTransform.inverted().map(sp);
     double left = 0, top = 0, right = m_startW, bottom = m_startH;
     const int hnd = m_drag;

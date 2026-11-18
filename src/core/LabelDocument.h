@@ -3,6 +3,7 @@
 
 #include "DataSource.h"
 #include "LabelObject.h"
+#include "print/SheetLayout.h"
 
 #include <QColor>
 #include <QJsonObject>
@@ -19,7 +20,8 @@ struct LabelSetup {
 };
 
 struct PrintSettings {
-    QString layoutId = QStringLiteral("roll");
+    QString layoutId = QStringLiteral("roll");  // "custom" = layoutSetup
+    LayoutSetup layoutSetup;
     int startPosition = 1;       // first free position on a partly used sheet
     int copies = 1;              // copies of every record
     QString quantityField;       // optional column with per-record quantity

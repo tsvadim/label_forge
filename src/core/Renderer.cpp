@@ -41,6 +41,8 @@ void renderLabel(QPainter* p, const LabelDocument& doc, const RenderContext& ctx
     for (const auto& obj : doc.objects) {
         if (opt.printableOnly && !obj->printable)
             continue;
+        if (!obj->shownInCell(ctx.cell))
+            continue;
         renderObject(p, *obj, ctx);
     }
     if (opt.outline) {

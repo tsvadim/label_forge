@@ -85,6 +85,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
         m_props->refreshGeometry();
     });
     connect(m_scene, &LabelScene::insertRequested, this, &MainWindow::insertObject);
+    connect(m_scene, &LabelScene::cellRequested, this, [this](LabelObject* obj, int cell) {
+        obj->cell = cell;
+        m_scene->rebuild();
+        m_scene->selectObjects({obj});
+        commit(cell > 0 ? tr("Только в одной этикетке") : tr("Во всех этикетках"));
+        onSelectionChanged();
+    });
     connect(m_scene, &LabelScene::cursorMoved, this, [this](const QPointF& p) {
         m_statusPos->setText(tr("X: %1  Y: %2 мм").arg(p.x(), 0, 'f', 1).arg(p.y(), 0, 'f', 1));
         m_view->setCursorPos(p);
@@ -95,7 +102,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
     connect(m_props, &PropertyPanel::objectEdited, this, &MainWindow::onObjectEdited);
     connect(m_props, &PropertyPanel::labelEdited, this, &MainWindow::onLabelEdited);
     connect(m_props, &PropertyPanel::layoutApplied, this,
-            [this] { QTimer::singleShot(0, this, [this] { m_view->fitToLabel(QRectF(0, 0, m_doc.label.width, m_doc.label.height)); }); });
+            [this] { QTimer::singleShot(0, this, [this] { m_view->fitToLabel(m_scene->contentRect()); }); });
 
     QSettings st;
     m_scene->setGridStep(st.value(QStringLiteral("view/grid"), 1.0).toDouble());
@@ -103,6 +110,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
     m_scene->setSnapEnabled(st.value(QStringLiteral("view/snap"), true).toBool());
     m_act.value(QStringLiteral("grid"))->setChecked(m_scene->gridVisible());
     m_act.value(QStringLiteral("snap"))->setChecked(m_scene->snapEnabled());
+    m_act.value(QStringLiteral("layoutView"))->setChecked(st.value(QStringLiteral("view/layout"), false).toBool());
     resize(1280, 820);
     restoreGeometry(st.value(QStringLiteral("window/geometry")).toByteArray());
     restoreState(st.value(QStringLiteral("window/state")).toByteArray());
@@ -131,6 +139,7 @@ void MainWindow::createActions()
     auto mk = [this](const QString& id, const QString& text, const QString& icon, const QKeySequence& ks,
                      std::function<void()> fn) {
         QAction* a = addAction(nullptr, text, icon, ks, std::move(fn));
+        a->setObjectName(id);
         m_act.insert(id, a);
         return a;
     };
@@ -235,7 +244,7 @@ void MainWindow::createActions()
     mk(QStringLiteral("zoomIn"), tr("Увеличить"), QStringLiteral("zoom-in"), QKeySequence::ZoomIn, [this] { m_view->zoomIn(); });
     mk(QStringLiteral("zoomOut"), tr("Уменьшить"), QStringLiteral("zoom-out"), QKeySequence::ZoomOut, [this] { m_view->zoomOut(); });
     mk(QStringLiteral("zoomFit"), tr("По размеру окна"), QStringLiteral("zoom-fit"), QKeySequence(tr("Ctrl+0")),
-       [this] { m_view->fitToLabel(QRectF(0, 0, m_doc.label.width, m_doc.label.height)); });
+       [this] { m_view->fitToLabel(m_scene->contentRect()); });
     mk(QStringLiteral("zoom100"), tr("Реальный размер (100%)"), QString(), QKeySequence(tr("Ctrl+1")), [this] { m_view->setZoom(1.0); });
     QAction* grid = mk(QStringLiteral("grid"), tr("Показывать сетку"), QStringLiteral("grid"), QKeySequence(tr("Ctrl+'")), [] {});
     grid->setCheckable(true);
@@ -254,6 +263,17 @@ void MainWindow::createActions()
     frames->setCheckable(true);
     frames->setChecked(true);
     connect(frames, &QAction::toggled, m_scene, &LabelScene::setShowObjectFrames);
+    QAction* layoutView = mk(QStringLiteral("layoutView"), tr("Вся разметка"), QStringLiteral("layout-view"),
+                             QKeySequence(tr("Ctrl+Shift+L")), [] {});
+    layoutView->setToolTip(tr("Показать весь лист или рулонную этикетку со всеми этикетками разметки.\n"
+                              "Общие объекты видны в каждой этикетке и двигаются вместе; данные идут по записям, "
+                              "как при печати."));
+    layoutView->setCheckable(true);
+    connect(layoutView, &QAction::toggled, this, [this](bool on) {
+        m_scene->setLayoutView(on);
+        QSettings().setValue(QStringLiteral("view/layout"), on);
+        QTimer::singleShot(0, this, [this] { m_view->fitToLabel(m_scene->contentRect()); });
+    });
 
     mk(QStringLiteral("dataSource"), tr("&Источник данных…"), QStringLiteral("data"), QKeySequence(tr("Ctrl+Shift+D")),
        [this] { editDataSource(); });
@@ -304,7 +324,7 @@ void MainWindow::createMenus()
         arr->addAction(m_act.value(QLatin1String(id)));
 
     m_viewMenu = menuBar()->addMenu(tr("&Вид"));
-    for (const char* id : {"zoomIn", "zoomOut", "zoomFit", "zoom100", "", "grid", "snap", "frames"}) {
+    for (const char* id : {"zoomIn", "zoomOut", "zoomFit", "zoom100", "", "layoutView", "grid", "snap", "frames"}) {
         if (!*id)
             m_viewMenu->addSeparator();
         else
@@ -327,7 +347,7 @@ void MainWindow::createToolbars()
     main->setObjectName(QStringLiteral("tbMain"));
     main->setIconSize(QSize(22, 22));
     for (const char* id : {"new", "open", "save", "", "undo", "redo", "", "print", "pdf", "", "dataSource", "", "zoomIn",
-                           "zoomOut", "zoomFit", "", "grid", "snap"}) {
+                           "zoomOut", "zoomFit", "", "layoutView", "grid", "snap"}) {
         if (!*id)
             main->addSeparator();
         else
@@ -467,7 +487,7 @@ void MainWindow::resetDocument()
     onSelectionChanged();
     updateObjectList();
     updateTitle();
-    QTimer::singleShot(0, this, [this] { m_view->fitToLabel(QRectF(0, 0, m_doc.label.width, m_doc.label.height)); });
+    QTimer::singleShot(0, this, [this] { m_view->fitToLabel(m_scene->contentRect()); });
 }
 
 void MainWindow::newBlank()
@@ -617,7 +637,7 @@ void MainWindow::manageSheets()
             m_scene->refreshAll();
             commit(tr("Шаблон листа"));
             onSelectionChanged();
-            m_view->fitToLabel(QRectF(0, 0, m_doc.label.width, m_doc.label.height));
+            m_view->fitToLabel(m_scene->contentRect());
         }
     }
 }
@@ -710,8 +730,9 @@ void MainWindow::dropEvent(QDropEvent* e)
     handleDroppedUrls(e->mimeData()->urls(), QPointF(2, 2));
 }
 
-void MainWindow::handleDroppedUrls(const QList<QUrl>& urls, const QPointF& pos)
+void MainWindow::handleDroppedUrls(const QList<QUrl>& urls, const QPointF& scenePos)
 {
+    const QPointF pos = m_scene->toLabel(scenePos);  // into the label under the mouse
     for (const QUrl& u : urls) {
         const QString path = u.toLocalFile();
         if (path.endsWith(QStringLiteral(".lfl"), Qt::CaseInsensitive)) {
@@ -785,6 +806,9 @@ void MainWindow::updatePreviewContext()
         ctx.values = &m_data.rows[r];
         ctx.recordNumber = r + 1;
         ctx.sequence = r + 1;
+        // the other labels of the layout show the next records
+        m_scene->setContext(ctx, &m_data, r);
+        return;
     }
     m_scene->setContext(ctx);
 }
@@ -1207,6 +1231,13 @@ void MainWindow::syncListSelection()
 
 void MainWindow::onObjectEdited(LabelObject* obj, const QString& key)
 {
+    if (key == QLatin1String("cell")) {
+        // other labels of the layout: other copies; rebuild once the panel's signal is done
+        QTimer::singleShot(0, this, [this, obj] {
+            m_scene->rebuild();
+            m_scene->selectObjects({obj});
+        });
+    }
     m_scene->refreshObject(obj);
     m_scene->update();
     commit(tr("Изменение свойства"), QStringLiteral("%1:%2").arg(m_doc.indexOf(obj)).arg(key));
@@ -1218,6 +1249,15 @@ void MainWindow::onObjectEdited(LabelObject* obj, const QString& key)
 void MainWindow::onLabelEdited(const QString& key)
 {
     m_scene->refreshAll();
+    // a layout with several labels: show them all right away
+    if (key.startsWith(QLatin1String("layout")) || key == QLatin1String("label.layout")) {
+        const SheetLayout l = PrintJob::layoutFor(m_doc, m_doc.print);
+        QAction* lv = m_act.value(QStringLiteral("layoutView"));
+        if (!l.roll && l.perPage() > 1 && !lv->isChecked())
+            lv->setChecked(true);
+        else
+            QTimer::singleShot(0, this, [this] { m_view->fitToLabel(m_scene->contentRect()); });
+    }
     commit(tr("Параметры этикетки"), QStringLiteral("label:") + key);
 }
 

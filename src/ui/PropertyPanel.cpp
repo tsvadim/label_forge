@@ -7,6 +7,7 @@
 #include "core/LabelObject.h"
 #include "core/RenderContext.h"
 #include "core/ShapePaths.h"
+#include "print/PrintJob.h"
 #include "print/SheetLayout.h"
 
 #include <QCheckBox>
@@ -26,6 +27,7 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QSpinBox>
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -235,6 +237,7 @@ QWidget* PropertyPanel::colorRow(LabelObject* o, const QString& prop, QColor* ta
 void PropertyPanel::build()
 {
     m_refreshers.clear();
+    m_updateLayoutSummary = nullptr;
     m_loading = true;
     auto* content = new QWidget;
     auto* outer = new QVBoxLayout(content);
@@ -286,10 +289,14 @@ void PropertyPanel::buildLabel(QFormLayout* f)
     f->addRow(tr("Ширина:"), spin(1, 1000, 2, 0.5, tr(" мм"), [d] { return d->label.width; }, [this, d](double v) {
                   d->label.width = v;
                   emit labelEdited(QStringLiteral("label.width"));
+                  if (m_updateLayoutSummary)
+                      m_updateLayoutSummary();
               }));
     f->addRow(tr("Высота:"), spin(1, 1000, 2, 0.5, tr(" мм"), [d] { return d->label.height; }, [this, d](double v) {
                   d->label.height = v;
                   emit labelEdited(QStringLiteral("label.height"));
+                  if (m_updateLayoutSummary)
+                      m_updateLayoutSummary();
               }));
     f->addRow(tr("Скругление:"), spin(0, 100, 2, 0.5, tr(" мм"), [d] { return d->label.radius; }, [this, d](double v) {
                   d->label.radius = v;
@@ -300,40 +307,163 @@ void PropertyPanel::buildLabel(QFormLayout* f)
                   emit labelEdited(QStringLiteral("label.bg"));
               }));
 
-    f->addRow(section(tr("Макет печати")));
-    auto* combo = new QComboBox;
-    combo->addItem(tr("Рулон / термопринтер"), QStringLiteral("roll"));
-    int cur = 0;
-    for (const SheetLayout& l : SheetLayoutLibrary::all()) {
-        if (l.id == QLatin1String("roll"))
-            continue;
-        combo->addItem(l.name, l.id);
-        if (l.id == d->print.layoutId)
-            cur = combo->count() - 1;
-    }
-    combo->setCurrentIndex(cur);
-    combo->setToolTip(tr("Выбор листа задаёт размер этикетки и раскладку при печати"));
-    connect(combo, &QComboBox::currentIndexChanged, this, [this, combo, d](int) {
+    // ---- layout: one label per roll label, several on a roll label or a sheet, or a catalogue sheet
+    f->addRow(section(tr("Разметка")));
+    enum { CarRoll, CarRollLabel, CarA4, CarLetter, CarCatalog };
+    LayoutSetup& ls = d->print.layoutSetup;
+    const QString lid = d->print.layoutId;
+    const int carrier = lid == QLatin1String("roll")     ? int(CarRoll)
+                        : lid == QLatin1String("custom") ? std::clamp(ls.carrier, 0, 3)
+                                                         : int(CarCatalog);
+    auto* car = new QComboBox;
+    car->setObjectName(QStringLiteral("layoutCarrier"));
+    car->addItems({tr("По одной (рулон, термопринтер)"), tr("Рулонная этикетка, несколько на одной"), tr("Лист A4"),
+                   tr("Лист Letter"), tr("Готовый лист из каталога")});
+    car->setCurrentIndex(carrier);
+    car->setToolTip(tr("На чём печатаются этикетки. «Несколько на одной» — например, три этикетки 30×20 в ряд "
+                       "на рулонной этикетке 100×70."));
+    connect(car, &QComboBox::currentIndexChanged, this, [this, d](int i) {
         if (m_loading)
             return;
-        const QString id = combo->currentData().toString();
-        d->print.layoutId = id;
-        if (id != QLatin1String("roll")) {
-            const SheetLayout l = SheetLayoutLibrary::find(id, d->label.width, d->label.height);
-            if (!l.roll) {
-                d->label.width = l.labelW;
-                d->label.height = l.labelH;
-                d->label.radius = l.radius;
-            } else {
-                d->label.width = l.labelW;
-                d->label.height = l.labelH;
-            }
+        if (i == CarRoll) {
+            d->print.layoutId = QStringLiteral("roll");
+        } else if (i == CarCatalog) {
+            // first sheet of the catalogue; the list below picks another one
+            for (const SheetLayout& l : SheetLayoutLibrary::all())
+                if (!l.roll && !l.autoFit) {
+                    d->print.layoutId = l.id;
+                    d->label.width = l.labelW;
+                    d->label.height = l.labelH;
+                    d->label.radius = l.radius;
+                    break;
+                }
+        } else {
+            d->print.layoutId = QStringLiteral("custom");
+            d->print.layoutSetup.carrier = i;
         }
-        emit labelEdited(QStringLiteral("label.layout"));
+        emit labelEdited(QStringLiteral("layout.carrier"));
         emit layoutApplied();
         rebuildLater();
     });
-    f->addRow(combo);
+    f->addRow(tr("Носитель:"), car);
+
+    if (carrier == CarCatalog) {
+        auto* combo = new QComboBox;
+        int cur = 0;
+        for (const SheetLayout& l : SheetLayoutLibrary::all()) {
+            if (l.roll)
+                continue;
+            combo->addItem(l.name, l.id);
+            if (l.id == lid)
+                cur = combo->count() - 1;
+        }
+        combo->setCurrentIndex(cur);
+        combo->setToolTip(tr("Выбор листа задаёт размер этикетки и раскладку при печати"));
+        connect(combo, &QComboBox::currentIndexChanged, this, [this, combo, d](int) {
+            if (m_loading)
+                return;
+            const SheetLayout l = SheetLayoutLibrary::find(combo->currentData().toString(), d->label.width, d->label.height);
+            d->print.layoutId = l.id;
+            if (!l.autoFit) {
+                d->label.width = l.labelW;
+                d->label.height = l.labelH;
+                d->label.radius = l.radius;
+            }
+            emit labelEdited(QStringLiteral("layout.sheet"));
+            emit layoutApplied();
+            rebuildLater();
+        });
+        f->addRow(combo);
+    } else if (carrier != CarRoll) {
+        auto layoutSpin = [this, f](const QString& label, double min, double max, std::function<double()> get,
+                                    std::function<void(double)> set, const QString& key) {
+            f->addRow(label, spin(min, max, 2, 0.5, tr(" мм"), get, [this, set, key](double v) {
+                          set(v);
+                          emit labelEdited(QStringLiteral("layout.") + key);
+                          if (m_updateLayoutSummary)
+                              m_updateLayoutSummary();
+                      }));
+        };
+        if (carrier == CarRollLabel) {
+            layoutSpin(tr("Ширина носителя:"), 5, 2000, [&ls] { return ls.carrierW; },
+                       [&ls](double v) { ls.carrierW = v; }, QStringLiteral("carrierW"));
+            layoutSpin(tr("Высота носителя:"), 5, 2000, [&ls] { return ls.carrierH; },
+                       [&ls](double v) { ls.carrierH = v; }, QStringLiteral("carrierH"));
+        }
+        auto* count = new QComboBox;
+        count->setObjectName(QStringLiteral("layoutCount"));
+        count->addItems({tr("Сколько поместится"), tr("Задать вручную")});
+        count->setCurrentIndex(ls.fit ? 0 : 1);
+        connect(count, &QComboBox::currentIndexChanged, this, [this, &ls](int i) {
+            if (m_loading)
+                return;
+            ls.fit = i == 0;
+            emit labelEdited(QStringLiteral("layout.fit"));
+            rebuildLater();
+        });
+        f->addRow(tr("Количество:"), count);
+        if (!ls.fit) {
+            auto intSpin = [this, f](const QString& label, int* target, const QString& key) {
+                auto* sp = new QSpinBox;
+                sp->setRange(1, 200);
+                sp->setValue(*target);
+                sp->setKeyboardTracking(false);
+                connect(sp, &QSpinBox::valueChanged, this, [this, target, key](int v) {
+                    if (m_loading)
+                        return;
+                    *target = v;
+                    emit labelEdited(QStringLiteral("layout.") + key);
+                    if (m_updateLayoutSummary)
+                        m_updateLayoutSummary();
+                });
+                f->addRow(label, sp);
+            };
+            intSpin(tr("В ряд:"), &ls.cols, QStringLiteral("cols"));
+            intSpin(tr("Рядов:"), &ls.rows, QStringLiteral("rows"));
+        }
+        layoutSpin(tr("Зазор по горизонтали:"), 0, 500, [&ls] { return ls.gapX; }, [&ls](double v) { ls.gapX = v; },
+                   QStringLiteral("gapX"));
+        layoutSpin(tr("Зазор по вертикали:"), 0, 500, [&ls] { return ls.gapY; }, [&ls](double v) { ls.gapY = v; },
+                   QStringLiteral("gapY"));
+        layoutSpin(tr("Поля носителя:"), 0, 500, [&ls] { return ls.margin; }, [&ls](double v) { ls.margin = v; },
+                   QStringLiteral("margin"));
+    }
+    if (carrier != CarRoll) {
+        auto* sum = new QLabel;
+        sum->setObjectName(QStringLiteral("layoutSummary"));
+        sum->setWordWrap(true);
+        // updated in place: rebuilding the panel would take the spin box away from under the mouse
+        m_updateLayoutSummary = [sum, d] {
+            const SheetLayout l = PrintJob::layoutFor(*d, d->print);
+            const double usedW = l.cols * l.labelW + (l.cols - 1) * std::max(0.0, l.pitchX - l.labelW);
+            const double usedH = l.rows * l.labelH + (l.rows - 1) * std::max(0.0, l.pitchY - l.labelH);
+            const bool overflow = usedW > l.pageW + 0.01 || usedH > l.pageH + 0.01;
+            sum->setText(overflow ? tr("Этикетки %1×%2 мм не помещаются на носитель %3×%4 мм — уменьшите "
+                                       "размер, количество или зазоры.")
+                                        .arg(d->label.width)
+                                        .arg(d->label.height)
+                                        .arg(l.pageW)
+                                        .arg(l.pageH)
+                                  : tr("На носителе %1×%2 мм: %3 в ряд × %4 = %5 %6×%7 мм.")
+                                        .arg(l.pageW)
+                                        .arg(l.pageH)
+                                        .arg(l.cols)
+                                        .arg(l.rows)
+                                        .arg([n = l.perPage()] {
+                                            const int m10 = n % 10, m100 = n % 100;
+                                            const QString word = m10 == 1 && m100 != 11 ? tr("этикетка")
+                                                                 : m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)
+                                                                     ? tr("этикетки")
+                                                                     : tr("этикеток");
+                                            return QStringLiteral("%1 %2").arg(n).arg(word);
+                                        }())
+                                        .arg(d->label.width)
+                                        .arg(d->label.height));
+            sum->setStyleSheet(overflow ? QStringLiteral("color: #c0392b;") : QString());
+        };
+        m_updateLayoutSummary();
+        f->addRow(sum);
+    }
     auto* hint = new QLabel(tr("Щёлкните по объекту, чтобы изменить его свойства. "
                                "Инструменты добавления — на панели слева."));
     hint->setWordWrap(true);
@@ -372,6 +502,29 @@ void PropertyPanel::buildCommon(QFormLayout* f, LabelObject* o)
         edited(o, QStringLiteral("name"));
     });
     f->addRow(tr("Имя:"), name);
+    {
+        // multi-up layouts: in every label, or only in one of them
+        const SheetLayout l = PrintJob::layoutFor(*m_doc, m_doc->print);
+        const int cells = l.roll ? 1 : l.perPage();
+        if (cells > 1 || o->cell > 0) {
+            auto* where = new QComboBox;
+            where->setObjectName(QStringLiteral("objectCell"));
+            where->addItem(tr("Во всех этикетках"), 0);
+            for (int c = 1; c <= cells; ++c)
+                where->addItem(tr("Только в этикетке № %1").arg(c), c);
+            if (o->cell > cells)
+                where->addItem(tr("Только в № %1 (такой нет в разметке)").arg(o->cell), o->cell);
+            where->setCurrentIndex(std::max(0, where->findData(o->cell)));
+            where->setToolTip(tr("Номера идут по рядам: слева направо, сверху вниз — как при печати"));
+            connect(where, &QComboBox::currentIndexChanged, this, [this, o, where](int) {
+                if (m_loading)
+                    return;
+                o->cell = where->currentData().toInt();
+                edited(o, QStringLiteral("cell"));
+            });
+            f->addRow(tr("Показывать:"), where);
+        }
+    }
     auto* printable = new QCheckBox(tr("Печатать объект"));
     printable->setChecked(o->printable);
     connect(printable, &QCheckBox::toggled, this, [this, o](bool on) {

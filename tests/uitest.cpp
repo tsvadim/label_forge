@@ -28,8 +28,10 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QListView>
+#include <QComboBox>
 #include <QDockWidget>
 #include <QDropEvent>
+#include <QLabel>
 #include <QListWidget>
 #include <QMenu>
 #include <QFile>
@@ -513,6 +515,82 @@ int main(int argc, char** argv)
         QApplication::setPalette(light);
         settle();
         CHECK(strokeGray() < 110, "theme: icons follow the switch back");
+    }
+
+    // whole-layout view: three labels in a row on a roll label, edited as one
+    {
+        LabelDocument* doc = scene->document();
+        const int undoStart = undo->index();
+        doc->print.layoutId = QStringLiteral("custom");
+        doc->print.layoutSetup.carrier = LayoutSetup::CarrierRollLabel;
+        doc->print.layoutSetup.carrierW = doc->label.width * 3 + 4 + 2;
+        doc->print.layoutSetup.carrierH = doc->label.height + 2;
+        doc->print.layoutSetup.fit = true;
+        doc->print.layoutSetup.gapX = 2;
+        auto box = std::make_unique<RectObject>();
+        box->x = 2;
+        box->y = 2;
+        box->w = box->h = 8;
+        box->fillType = shapes::FillSolid;
+        box->fill = QColor(200, 30, 30);
+        RectObject* boxp = box.get();
+        doc->objects.push_back(std::move(box));
+        QAction* lv = w.findChild<QAction*>(QStringLiteral("layoutView"));
+        CHECK(lv != nullptr, "layout view action present");
+        if (lv && lv->isChecked())
+            lv->setChecked(false);
+        scene->rebuild();
+        if (lv)
+            lv->setChecked(true);
+        settle();
+        std::printf("layout view: %d cells\n", scene->cellCount());
+        CHECK(scene->layoutView() && scene->cellCount() == 3, "layout view shows three labels");
+        CHECK(scene->itemsFor(boxp).size() == 3, "shared object has a copy in every label");
+        CHECK(scene->contentRect().width() > doc->label.width * 3, "view shows the whole carrier");
+        CHECK(scene->contextFor(2).recordNumber == scene->contextFor(1).recordNumber % 3 + 1,
+              "next label shows the next record");
+
+        // drag the copy in the second label: all copies follow
+        ObjectItem* second = scene->itemsFor(boxp).value(1);
+        const QPoint at = view->mapFromScene(second->mapToScene(QPointF(4, 4)));
+        const QPoint to = view->mapFromScene(second->mapToScene(QPointF(9, 4)));
+        mouse(vp, QEvent::MouseButtonPress, at, Qt::LeftButton);
+        mouse(vp, QEvent::MouseMove, (at + to) / 2, Qt::LeftButton);
+        mouse(vp, QEvent::MouseMove, to, Qt::LeftButton);
+        mouse(vp, QEvent::MouseButtonRelease, to, Qt::NoButton);
+        settle();
+        std::printf("dragged copy: x %.2f\n", boxp->x);
+        CHECK(std::abs(boxp->x - 7) < 0.6, "dragging a copy moves the object");
+        bool follow = true;
+        for (ObjectItem* it : scene->itemsFor(boxp))
+            follow = follow && (it->pos() - it->origin() - QPointF(boxp->x, boxp->y)).manhattanLength() < 0.01;
+        CHECK(follow, "every copy follows");
+        CHECK(scene->selectedObjects() == QList<LabelObject*>({boxp}), "copies count as one selected object");
+        shot(&w, out, QStringLiteral("17_layout_view"));
+
+        // only in the second label
+        emit scene->cellRequested(boxp, 2);
+        settle();
+        CHECK(boxp->cell == 2 && scene->itemsFor(boxp).size() == 1 && scene->itemsFor(boxp).value(0)->cell() == 2,
+              "object kept only in the second label");
+        auto* panel = w.findChild<PropertyPanel*>();
+        auto* where = panel ? panel->findChild<QComboBox*>(QStringLiteral("objectCell")) : nullptr;
+        CHECK(where && where->currentData().toInt() == 2, "panel shows where the object is shown");
+        shot(&w, out, QStringLiteral("18_layout_cell"));
+        scene->clearSelection();
+        settle();
+        auto* summary = panel ? panel->findChild<QLabel*>(QStringLiteral("layoutSummary")) : nullptr;
+        std::printf("layout summary: %s\n", summary ? qPrintable(summary->text()) : "-");
+        CHECK(summary && summary->text().contains(QStringLiteral("3 в ряд")), "panel sums up the layout");
+        shot(panel, out, QStringLiteral("19_layout_props"));
+
+        while (undo->index() > undoStart)
+            undo->undo();
+        if (lv)
+            lv->setChecked(false);
+        settle();
+        CHECK(scene->cellCount() == 1 && scene->document()->print.layoutId != QLatin1String("custom"),
+              "undo and the switch bring back one label");
     }
 
     // shape tool: pick a kind from the menu, click on the label, edit the effects

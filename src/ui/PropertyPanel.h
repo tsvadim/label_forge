@@ -55,6 +55,7 @@ private:
     QList<LabelObject*> m_sel;
     QStringList m_fields;
     QVector<std::function<void()>> m_refreshers;
+    std::function<void()> m_updateLayoutSummary;  // the "N labels on the carrier" line
     bool m_loading = false;
 };
 

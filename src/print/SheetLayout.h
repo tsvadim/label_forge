@@ -37,6 +37,24 @@ struct SheetLayout {
     static void fitGrid(SheetLayout& l, double margin, double gap);
 };
 
+// Quick multi-up setup stored in the label file (layout id "custom"): the
+// carrier - an A4/Letter sheet, or a roll label carrying several small
+// labels - and how many labels of the document's label size go on it.
+struct LayoutSetup {
+    enum Carrier { CarrierRoll = 0, CarrierRollLabel = 1, CarrierA4 = 2, CarrierLetter = 3 };
+    int carrier = CarrierRollLabel;
+    double carrierW = 100, carrierH = 70;  // CarrierRollLabel
+    bool fit = true;                       // as many as fit; otherwise cols x rows
+    int cols = 3, rows = 1;
+    double gapX = 2, gapY = 2;  // between labels, mm
+    double margin = 0;          // minimum free edge of the carrier, mm
+
+    // The grid is centred on the carrier.
+    SheetLayout resolve(double labelW, double labelH) const;
+    QJsonObject toJson() const;
+    static LayoutSetup fromJson(const QJsonObject& o);
+};
+
 class SheetLayoutLibrary {
 public:
     static QVector<SheetLayout> builtins();

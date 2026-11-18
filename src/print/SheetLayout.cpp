@@ -146,6 +146,77 @@ SheetLayout SheetLayout::fromJson(const QJsonObject& o)
     return l;
 }
 
+SheetLayout LayoutSetup::resolve(double labelW, double labelH) const
+{
+    if (carrier == CarrierRoll) {
+        SheetLayout r = SheetLayout::rollFor(labelW, labelH);
+        r.id = QStringLiteral("custom");
+        return r;
+    }
+    SheetLayout l;
+    l.id = QStringLiteral("custom");
+    l.name = tr("Своя разметка");
+    l.builtin = false;
+    l.roll = false;
+    l.pageW = carrier == CarrierA4 ? 210 : carrier == CarrierLetter ? 215.9 : std::max(1.0, carrierW);
+    l.pageH = carrier == CarrierA4 ? 297 : carrier == CarrierLetter ? 279.4 : std::max(1.0, carrierH);
+    l.category = carrier == CarrierRollLabel ? tr("Рулон — несколько на одной") : tr("Лист");
+    l.labelW = std::max(0.1, labelW);
+    l.labelH = std::max(0.1, labelH);
+    const double gx = std::max(0.0, gapX), gy = std::max(0.0, gapY), m = std::max(0.0, margin);
+    l.pitchX = l.labelW + gx;
+    l.pitchY = l.labelH + gy;
+    if (fit) {
+        l.cols = std::max(1, int((l.pageW - 2 * m + gx + 1e-6) / l.pitchX));
+        l.rows = std::max(1, int((l.pageH - 2 * m + gy + 1e-6) / l.pitchY));
+    } else {
+        l.cols = std::clamp(cols, 1, 200);
+        l.rows = std::clamp(rows, 1, 200);
+    }
+    l.marginLeft = std::max(0.0, (l.pageW - (l.cols * l.pitchX - gx)) / 2);
+    l.marginTop = std::max(0.0, (l.pageH - (l.rows * l.pitchY - gy)) / 2);
+    return l;
+}
+
+QJsonObject LayoutSetup::toJson() const
+{
+    static const char* const names[] = {"roll", "rollLabel", "a4", "letter"};
+    QJsonObject o;
+    o[QStringLiteral("carrier")] = QLatin1String(names[std::clamp(carrier, 0, 3)]);
+    if (carrier == CarrierRollLabel) {
+        o[QStringLiteral("carrierW")] = carrierW;
+        o[QStringLiteral("carrierH")] = carrierH;
+    }
+    o[QStringLiteral("fit")] = fit;
+    if (!fit) {
+        o[QStringLiteral("cols")] = cols;
+        o[QStringLiteral("rows")] = rows;
+    }
+    o[QStringLiteral("gapX")] = gapX;
+    o[QStringLiteral("gapY")] = gapY;
+    o[QStringLiteral("margin")] = margin;
+    return o;
+}
+
+LayoutSetup LayoutSetup::fromJson(const QJsonObject& o)
+{
+    LayoutSetup s;
+    const QString c = o.value(QStringLiteral("carrier")).toString();
+    s.carrier = c == QLatin1String("roll")     ? CarrierRoll
+                : c == QLatin1String("a4")     ? CarrierA4
+                : c == QLatin1String("letter") ? CarrierLetter
+                                               : CarrierRollLabel;
+    s.carrierW = std::clamp(o.value(QStringLiteral("carrierW")).toDouble(100), 1.0, 2000.0);
+    s.carrierH = std::clamp(o.value(QStringLiteral("carrierH")).toDouble(70), 1.0, 2000.0);
+    s.fit = o.value(QStringLiteral("fit")).toBool(true);
+    s.cols = std::clamp(o.value(QStringLiteral("cols")).toInt(3), 1, 200);
+    s.rows = std::clamp(o.value(QStringLiteral("rows")).toInt(1), 1, 200);
+    s.gapX = std::clamp(o.value(QStringLiteral("gapX")).toDouble(2), 0.0, 500.0);
+    s.gapY = std::clamp(o.value(QStringLiteral("gapY")).toDouble(2), 0.0, 500.0);
+    s.margin = std::clamp(o.value(QStringLiteral("margin")).toDouble(0), 0.0, 500.0);
+    return s;
+}
+
 SheetLayout SheetLayout::rollFor(double w, double h)
 {
     SheetLayout l;

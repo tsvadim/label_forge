@@ -60,6 +60,11 @@ public:
     double shadowOpacity = 0.6;
     double shadowBlur = 0;  // mm, 0 = sharp (stays vector)
 
+    // Multi-up layouts: 0 = shown in every label of the layout, N = only in
+    // the N-th label of a sheet / roll label (row by row, 1-based).
+    int cell = 0;
+    bool shownInCell(int c) const { return cell <= 0 || c <= 0 || cell == c; }
+
     // Colours taken from a data field: property key ("color", "fill",
     // "stroke", "tint") -> template such as "{Colour}". An empty or invalid
     // value, and the design view, keep the object's own colour.

@@ -13,6 +13,8 @@ QJsonObject PrintSettings::toJson() const
 {
     QJsonObject o;
     o[QStringLiteral("layout")] = layoutId;
+    if (layoutId == QLatin1String("custom"))
+        o[QStringLiteral("layoutSetup")] = layoutSetup.toJson();
     o[QStringLiteral("startPosition")] = startPosition;
     o[QStringLiteral("copies")] = copies;
     o[QStringLiteral("quantityField")] = quantityField;
@@ -37,6 +39,7 @@ PrintSettings PrintSettings::fromJson(const QJsonObject& o)
 {
     PrintSettings p;
     p.layoutId = o.value(QStringLiteral("layout")).toString(QStringLiteral("roll"));
+    p.layoutSetup = LayoutSetup::fromJson(o.value(QStringLiteral("layoutSetup")).toObject());
     p.startPosition = std::max(1, o.value(QStringLiteral("startPosition")).toInt(1));
     p.copies = std::max(1, o.value(QStringLiteral("copies")).toInt(1));
     p.quantityField = o.value(QStringLiteral("quantityField")).toString();

@@ -56,7 +56,7 @@ PrintJob::PrintJob(const LabelDocument& doc, const DataTable& data, const PrintS
                    const QString& baseDir)
     : m_doc(doc), m_data(data), m_settings(settings), m_baseDir(baseDir)
 {
-    m_layout = SheetLayoutLibrary::find(settings.layoutId, doc.label.width, doc.label.height);
+    m_layout = layoutFor(doc, settings);
     const int copies = std::max(1, settings.copies);
     int qtyCol = -1;
     if (!settings.quantityField.isEmpty())
@@ -77,6 +77,13 @@ PrintJob::PrintJob(const LabelDocument& doc, const DataTable& data, const PrintS
         for (int c = 0; c < qty; ++c)
             m_instances.push_back({rec, seq++});
     }
+}
+
+SheetLayout PrintJob::layoutFor(const LabelDocument& doc, const PrintSettings& settings)
+{
+    if (settings.layoutId == QLatin1String("custom"))
+        return settings.layoutSetup.resolve(doc.label.width, doc.label.height);
+    return SheetLayoutLibrary::find(settings.layoutId, doc.label.width, doc.label.height);
 }
 
 int PrintJob::pageCount() const
@@ -118,6 +125,7 @@ void PrintJob::renderPage(QPainter* p, int page, double deviceDpi, bool mono) co
         const double dx = (cell.width() - m_doc.label.width) / 2.0;
         const double dy = (cell.height() - m_doc.label.height) / 2.0;
         RenderContext ctx = contextFor(m_instances.at(idx));
+        ctx.cell = i + 1;
         ctx.deviceDpi = deviceDpi;
         ctx.monoDither = mono;
         p->save();
@@ -195,8 +203,12 @@ bool PrintJob::exportPng(const QString& pattern, double dpi, QString* err) const
 {
     int n = 1;
     const int width = QString::number(m_instances.size()).size();
+    const int per = m_layout.roll ? 1 : m_layout.perPage();
+    const int skip = m_layout.roll ? 0 : std::clamp(m_settings.startPosition, 1, per) - 1;
     for (const LabelInstance& li : m_instances) {
-        const QImage img = renderLabelImage(m_doc, contextFor(li), dpi, false);
+        RenderContext ctx = contextFor(li);
+        ctx.cell = (n - 1 + skip) % per + 1;  // the label's place on the sheet decides its own objects
+        const QImage img = renderLabelImage(m_doc, ctx, dpi, false);
         const QString path = pattern.contains(QLatin1String("%1"))
                                  ? pattern.arg(n, width, 10, QLatin1Char('0'))
                                  : pattern;

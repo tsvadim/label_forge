@@ -95,6 +95,8 @@ QJsonObject LabelObject::toJson() const
         o[QStringLiteral("locked")] = true;
     if (!printable)
         o[QStringLiteral("printable")] = false;
+    if (cell > 0)
+        o[QStringLiteral("cell")] = cell;
     if (shadow) {
         QJsonObject s;
         s[QStringLiteral("dx")] = shadowDx;
@@ -124,6 +126,7 @@ void LabelObject::fromJson(const QJsonObject& o)
     rotation = num(o, "rotation", 0);
     locked = flag(o, "locked", false);
     printable = flag(o, "printable", true);
+    cell = std::max(0, int(num(o, "cell", 0)));
     const QJsonValue sv = o.value(QLatin1String("shadow"));
     shadow = sv.isObject();
     const QJsonObject s = sv.toObject();

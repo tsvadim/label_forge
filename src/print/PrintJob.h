@@ -39,6 +39,10 @@ public:
     // one PNG per label: path pattern with %1 for the number, e.g. "label_%1.png"
     bool exportPng(const QString& pattern, double dpi, QString* err) const;
 
+    // The layout the settings choose for this document (a library layout or
+    // the document's own multi-up setup).
+    static SheetLayout layoutFor(const LabelDocument& doc, const PrintSettings& settings);
+
     // "1-3, 5" -> {0,1,2,4} (0-based), empty -> all
     static QVector<int> parseRange(const QString& range, int count);
 

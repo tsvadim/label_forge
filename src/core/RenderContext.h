@@ -25,6 +25,7 @@ struct RenderContext {
     bool monoDither = false;               // 1-bit thermal output: images with dither on are pre-dithered to dots
     QDateTime now = QDateTime::currentDateTime();
     QString baseDir;                       // resolves relative image paths
+    int cell = 1;                          // place of the label on the sheet (1-based), see LabelObject::cell
 
     bool fieldValue(const QString& name, QString* out) const;
 };

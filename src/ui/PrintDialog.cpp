@@ -234,6 +234,11 @@ void PrintDialog::fillLayouts()
     m_layout->clear();
     m_layout->addItem(tr("Рулон / термопринтер (%1×%2 мм)").arg(m_doc.label.width).arg(m_doc.label.height),
                       QStringLiteral("roll"));
+    {
+        // the label's own multi-up setup (Properties -> Layout)
+        const SheetLayout own = m_settings.layoutSetup.resolve(m_doc.label.width, m_doc.label.height);
+        m_layout->addItem(tr("Разметка этикетки: %1").arg(own.summary()), QStringLiteral("custom"));
+    }
     for (const SheetLayout& l : SheetLayoutLibrary::all())
         if (l.id != QLatin1String("roll"))
             m_layout->addItem(l.name, l.id);
