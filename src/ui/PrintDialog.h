@@ -16,6 +16,7 @@ class QGroupBox;
 class QPushButton;
 class QToolButton;
 class QPrinter;
+class QFormLayout;
 
 namespace lf {
 
@@ -34,6 +35,13 @@ private:
     void fillLayouts();
     void updateJob();
     void updateOutputUi();
+    QString currentPrinter() const;
+    QString printerKey() const;
+    void selectPrinterForLayout();
+    void onPrinterChanged();
+    void updatePrinterWarning();
+    QPrinter* printerObject();
+    void printerSetup();
     void run();
     void showSystemPreview();
     bool printToPrinter();
@@ -58,6 +66,11 @@ private:
     QDoubleSpinBox* m_offX;
     QDoubleSpinBox* m_offY;
     QComboBox* m_output;
+    QFormLayout* m_outForm;
+    QComboBox* m_printer;
+    QToolButton* m_printerSetup;
+    QLabel* m_printerWarn;
+    std::unique_ptr<QPrinter> m_qprinter;  // keeps driver settings while the dialog is open
     QGroupBox* m_thermalBox;
     QComboBox* m_lang;
     QComboBox* m_dpi;
@@ -65,7 +78,6 @@ private:
     QSpinBox* m_speed;
     QDoubleSpinBox* m_gap;
     QCheckBox* m_invert;
-    QComboBox* m_thermalPrinter;
     QLabel* m_summary;
     PagePreview* m_preview;
     QToolButton* m_prev;

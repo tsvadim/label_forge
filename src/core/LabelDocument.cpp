@@ -22,7 +22,8 @@ QJsonObject PrintSettings::toJson() const
     o[QStringLiteral("printOutlines")] = printOutlines;
     o[QStringLiteral("offsetX")] = offsetX;
     o[QStringLiteral("offsetY")] = offsetY;
-    o[QStringLiteral("printer")] = printerName;
+    // printers are machine-specific: the program remembers them per layout,
+    // "printer" is only read from older files
     QJsonObject t;
     t[QStringLiteral("lang")] = thermalLang;
     t[QStringLiteral("dpi")] = thermalDpi;
@@ -30,7 +31,6 @@ QJsonObject PrintSettings::toJson() const
     t[QStringLiteral("speed")] = speed;
     t[QStringLiteral("gap")] = gapMm;
     t[QStringLiteral("tsplInvert")] = tsplInvert;
-    t[QStringLiteral("printer")] = thermalPrinter;
     o[QStringLiteral("thermal")] = t;
     return o;
 }

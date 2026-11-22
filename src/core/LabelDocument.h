@@ -28,7 +28,7 @@ struct PrintSettings {
     QString recordRange;         // "1-5, 8, 10-12"; empty = all
     bool printOutlines = false;  // draw label outlines (test prints)
     double offsetX = 0, offsetY = 0;  // printer calibration, mm
-    QString printerName;
+    QString printerName;  // read from older files only, not saved
 
     // thermal printers (raw)
     QString thermalLang = QStringLiteral("zpl");  // zpl | tspl
@@ -37,7 +37,7 @@ struct PrintSettings {
     int speed = 4;
     double gapMm = 2;
     bool tsplInvert = true;
-    QString thermalPrinter;
+    QString thermalPrinter;  // read from older files only, not saved
 
     QJsonObject toJson() const;
     static PrintSettings fromJson(const QJsonObject& o);

@@ -48,6 +48,7 @@ PrintDialog::PrintDialog(const LabelDocument& doc, const DataTable& data, const 
     auto* fl = new QFormLayout(gLayout);
     auto* lrow = new QHBoxLayout;
     m_layout = new QComboBox;
+    m_layout->setObjectName(QStringLiteral("layout"));
     m_layout->setMinimumWidth(260);
     auto* manage = new QToolButton;
     manage->setText(tr("…"));
@@ -110,14 +111,41 @@ PrintDialog::PrintDialog(const LabelDocument& doc, const DataTable& data, const 
 
     // ---------------- output
     auto* gOut = new QGroupBox(tr("Вывод"));
-    auto* fo = new QFormLayout(gOut);
+    auto* fo = m_outForm = new QFormLayout(gOut);
     m_output = new QComboBox;
+    m_output->setObjectName(QStringLiteral("output"));
     m_output->addItem(tr("Принтер (через драйвер Windows)"), int(OutPrinter));
     m_output->addItem(tr("Файл PDF"), int(OutPdf));
     m_output->addItem(tr("Термопринтер напрямую (ZPL / TSPL)"), int(OutThermal));
     m_output->addItem(tr("Файл команд принтера (.zpl / .prn)"), int(OutThermalFile));
     m_output->addItem(tr("Изображения PNG"), int(OutPng));
     fo->addRow(tr("Куда:"), m_output);
+    // every printer Windows knows, network ones included
+    auto* prow = new QHBoxLayout;
+    m_printer = new QComboBox;
+    m_printer->setObjectName(QStringLiteral("printer"));
+    const QString defaultName = QPrinterInfo::defaultPrinterName();
+    for (const QPrinterInfo& pi : QPrinterInfo::availablePrinters()) {
+        QString text = pi.printerName();
+        if (pi.isRemote())
+            text += tr(" (сетевой)");
+        if (pi.printerName() == defaultName)
+            text += tr(" — по умолчанию");
+        m_printer->addItem(text, pi.printerName());
+        m_printer->setItemData(m_printer->count() - 1, pi.description(), Qt::ToolTipRole);
+    }
+    m_printerSetup = new QToolButton;
+    m_printerSetup->setObjectName(QStringLiteral("printerSetup"));
+    m_printerSetup->setText(tr("Настройки…"));
+    m_printerSetup->setToolTip(tr("Настройки драйвера: лоток, бумага, качество"));
+    prow->addWidget(m_printer, 1);
+    prow->addWidget(m_printerSetup);
+    fo->addRow(tr("Принтер:"), prow);
+    m_printerWarn = new QLabel;
+    m_printerWarn->setObjectName(QStringLiteral("printerWarn"));
+    m_printerWarn->setWordWrap(true);
+    m_printerWarn->setStyleSheet(QStringLiteral("color: #c0392b;"));
+    fo->addRow(m_printerWarn);
     left->addWidget(gOut);
 
     m_thermalBox = new QGroupBox(tr("Термопринтер"));
@@ -127,13 +155,6 @@ PrintDialog::PrintDialog(const LabelDocument& doc, const DataTable& data, const 
     m_lang->addItem(tr("TSPL (TSC, Xprinter, Gprinter…)"), QStringLiteral("tspl"));
     m_lang->setCurrentIndex(std::max(0, m_lang->findData(m_settings.thermalLang)));
     ft->addRow(tr("Язык:"), m_lang);
-    m_thermalPrinter = new QComboBox;
-    m_thermalPrinter->addItems(QPrinterInfo::availablePrinterNames());
-    if (!m_settings.thermalPrinter.isEmpty())
-        m_thermalPrinter->setCurrentText(m_settings.thermalPrinter);
-    else if (!QPrinterInfo::defaultPrinterName().isEmpty())
-        m_thermalPrinter->setCurrentText(QPrinterInfo::defaultPrinterName());
-    ft->addRow(tr("Принтер:"), m_thermalPrinter);
     m_dpi = new QComboBox;
     for (int d : {203, 300, 600})
         m_dpi->addItem(QStringLiteral("%1 dpi").arg(d), d);
@@ -188,6 +209,7 @@ PrintDialog::PrintDialog(const LabelDocument& doc, const DataTable& data, const 
     right->addWidget(bb);
 
     fillLayouts();
+    selectPrinterForLayout();
     QSettings st;
     m_output->setCurrentIndex(std::max(0, m_output->findData(st.value(QStringLiteral("print/output"), 0).toInt())));
 
@@ -196,12 +218,16 @@ PrintDialog::PrintDialog(const LabelDocument& doc, const DataTable& data, const 
         if (dlg.exec() == QDialog::Accepted && !dlg.selectedId().isEmpty())
             m_settings.layoutId = dlg.selectedId();
         fillLayouts();
+        selectPrinterForLayout();
         updateJob();
     });
     connect(m_layout, &QComboBox::currentIndexChanged, this, [this] {
         m_settings.layoutId = m_layout->currentData().toString();
+        selectPrinterForLayout();
         updateJob();
     });
+    connect(m_printer, &QComboBox::currentIndexChanged, this, &PrintDialog::onPrinterChanged);
+    connect(m_printerSetup, &QToolButton::clicked, this, &PrintDialog::printerSetup);
     connect(m_range, &QLineEdit::textChanged, this, &PrintDialog::updateJob);
     connect(m_copies, &QSpinBox::valueChanged, this, &PrintDialog::updateJob);
     connect(m_qtyField, &QComboBox::currentIndexChanged, this, &PrintDialog::updateJob);
@@ -262,15 +288,103 @@ PrintSettings PrintDialog::settings() const
     s.speed = m_speed->value();
     s.gapMm = m_gap->value();
     s.tsplInvert = m_invert->isChecked();
-    s.thermalPrinter = m_thermalPrinter->currentText();
+    // the printer is remembered per layout in the program settings, not in the file
+    s.printerName = s.thermalPrinter = currentPrinter();
     return s;
+}
+
+QString PrintDialog::currentPrinter() const { return m_printer->currentData().toString(); }
+
+// Settings key of the printer remembered for the chosen layout: a roll goes to
+// the thermal printer, an A4 sheet to the office one.
+QString PrintDialog::printerKey() const
+{
+    QString id = m_layout->currentData().toString();
+    if (id == QLatin1String("custom"))
+        id += QStringLiteral("-%1").arg(m_settings.layoutSetup.carrier);
+    return QStringLiteral("print/printerFor/") + id;
+}
+
+void PrintDialog::selectPrinterForLayout()
+{
+    const bool roll = m_layout->currentData().toString() == QLatin1String("roll");
+    // remembered for this layout -> from an older file -> the Windows default
+    const QStringList candidates{QSettings().value(printerKey()).toString(),
+                                 roll ? m_doc.print.thermalPrinter : m_doc.print.printerName,
+                                 roll ? m_doc.print.printerName : m_doc.print.thermalPrinter,
+                                 QPrinterInfo::defaultPrinterName()};
+    for (const QString& name : candidates) {
+        const int i = name.isEmpty() ? -1 : m_printer->findData(name);
+        if (i >= 0) {
+            const QSignalBlocker b(m_printer);
+            m_printer->setCurrentIndex(i);
+            break;
+        }
+    }
+    onPrinterChanged();
+}
+
+void PrintDialog::onPrinterChanged()
+{
+    const QString name = currentPrinter();
+    if (!name.isEmpty())
+        QSettings().setValue(printerKey(), name);
+    // keep the driver settings made for this printer
+    if (m_qprinter && m_qprinter->printerName() != name)
+        m_qprinter.reset();
+    updatePrinterWarning();
+}
+
+void PrintDialog::updatePrinterWarning()
+{
+    const auto out = Output(m_output->currentData().toInt());
+    QString text;
+    if (out == OutPrinter && m_job && !currentPrinter().isEmpty()) {
+        const SheetLayout& l = m_job->layout();
+        if (!PrintJob::pageFits(QPrinterInfo::printerInfo(currentPrinter()), l))
+            text = tr("Принтер не поддерживает формат %1×%2 мм. Выберите лист (например, A4) "
+                      "или другой принтер — иначе этикетки будут напечатаны на его обычной бумаге.")
+                       .arg(l.pageW)
+                       .arg(l.pageH);
+    }
+    m_printerWarn->setText(text);
+    m_outForm->setRowVisible(m_printerWarn, !text.isEmpty());
+}
+
+QPrinter* PrintDialog::printerObject()
+{
+    if (!m_qprinter) {
+        m_qprinter = std::make_unique<QPrinter>(QPrinter::HighResolution);
+        if (!currentPrinter().isEmpty())
+            m_qprinter->setPrinterName(currentPrinter());
+    }
+    m_qprinter->setDocName(m_doc.title.isEmpty() ? QStringLiteral("LabelForge") : m_doc.title);
+    return m_qprinter.get();
+}
+
+// The Windows print dialog, used only for driver settings (its "Properties"
+// button); picking another printer there updates our list.
+void PrintDialog::printerSetup()
+{
+    QPrinter* printer = printerObject();
+    QPrintDialog dlg(printer, this);
+    dlg.setWindowTitle(tr("Настройки принтера"));
+    dlg.setOption(QAbstractPrintDialog::PrintToFile, false);
+    dlg.setOption(QAbstractPrintDialog::PrintPageRange, false);
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+    const int i = m_printer->findData(printer->printerName());
+    if (i >= 0)
+        m_printer->setCurrentIndex(i);
 }
 
 void PrintDialog::updateOutputUi()
 {
     const auto out = Output(m_output->currentData().toInt());
     m_thermalBox->setVisible(out == OutThermal || out == OutThermalFile);
-    m_thermalPrinter->setEnabled(out == OutThermal);
+    m_outForm->setRowVisible(1, out == OutPrinter || out == OutThermal);  // the "Принтер:" row
+    m_printerSetup->setVisible(out == OutPrinter);
+    updatePrinterWarning();
     m_sysPreview->setVisible(out == OutPrinter);
     static const char* labels[] = {"Печать", "Сохранить PDF", "Отправить на принтер", "Сохранить файл",
                                    "Сохранить PNG"};
@@ -300,6 +414,7 @@ void PrintDialog::updateJob()
     m_next->setEnabled(m_page + 1 < pages);
     m_summary->setText(tr("Этикеток: <b>%1</b>, страниц: <b>%2</b>").arg(m_job->labelCount()).arg(pages));
     m_run->setEnabled(m_job->labelCount() > 0);
+    updatePrinterWarning();
 }
 
 void PrintDialog::run()
@@ -319,19 +434,27 @@ void PrintDialog::run()
 
 bool PrintDialog::printToPrinter()
 {
-    QPrinter printer(QPrinter::HighResolution);
-    if (!m_settings.printerName.isEmpty())
-        printer.setPrinterName(m_settings.printerName);
-    printer.setDocName(m_doc.title.isEmpty() ? QStringLiteral("LabelForge") : m_doc.title);
-    QPrintDialog dlg(&printer, this);
-    dlg.setOption(QAbstractPrintDialog::PrintToFile, false);
-    dlg.setOption(QAbstractPrintDialog::PrintPageRange, false);
-    if (dlg.exec() != QDialog::Accepted)
+    if (currentPrinter().isEmpty()) {
+        QMessageBox::warning(this, windowTitle(), tr("Не выбран принтер."));
         return false;
-    m_settings.printerName = printer.printerName();
+    }
+    QPrinter* printer = printerObject();
+    // a page size the printer does not know: print on its own paper, or force it
+    bool setPage = true;
+    if (!PrintJob::pageFits(QPrinterInfo::printerInfo(currentPrinter()), m_job->layout())) {
+        QMessageBox box(QMessageBox::Warning, windowTitle(), m_printerWarn->text(), QMessageBox::NoButton, this);
+        QPushButton* own = box.addButton(tr("На бумаге принтера"), QMessageBox::AcceptRole);
+        QPushButton* force = box.addButton(tr("Задать размер этикетки"), QMessageBox::ActionRole);
+        box.addButton(tr("Отмена"), QMessageBox::RejectRole);
+        box.setDefaultButton(own);
+        box.exec();
+        if (box.clickedButton() != own && box.clickedButton() != force)
+            return false;
+        setPage = box.clickedButton() == force;
+    }
     QApplication::setOverrideCursor(Qt::WaitCursor);
     QString err;
-    const bool ok = m_job->printTo(&printer, &err);
+    const bool ok = m_job->printTo(printer, &err, setPage);
     QApplication::restoreOverrideCursor();
     if (!ok)
         QMessageBox::warning(this, windowTitle(), err);
@@ -341,10 +464,7 @@ bool PrintDialog::printToPrinter()
 void PrintDialog::showSystemPreview()
 {
     updateJob();
-    QPrinter printer(QPrinter::HighResolution);
-    if (!m_settings.printerName.isEmpty())
-        printer.setPrinterName(m_settings.printerName);
-    QPrintPreviewDialog dlg(&printer, this);
+    QPrintPreviewDialog dlg(printerObject(), this);
     dlg.resize(1000, 750);
     connect(&dlg, &QPrintPreviewDialog::paintRequested, this, [this](QPrinter* p) {
         QString err;
@@ -401,12 +521,12 @@ bool PrintDialog::sendThermal(bool toFile)
         }
         return true;
     }
-    if (m_thermalPrinter->currentText().isEmpty()) {
+    if (currentPrinter().isEmpty()) {
         QMessageBox::warning(this, windowTitle(), tr("Не выбран принтер."));
         return false;
     }
     QString err;
-    if (!sendRawToPrinter(m_thermalPrinter->currentText(), data,
+    if (!sendRawToPrinter(currentPrinter(), data,
                           m_doc.title.isEmpty() ? QStringLiteral("LabelForge") : m_doc.title, &err)) {
         QMessageBox::warning(this, windowTitle(), err);
         return false;

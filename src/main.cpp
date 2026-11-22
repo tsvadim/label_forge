@@ -110,11 +110,12 @@ int main(int argc, char** argv)
     QTranslator qtTr;
     const QStringList trDirs{QApplication::applicationDirPath() + QStringLiteral("/translations"),
                              QLibraryInfo::path(QLibraryInfo::TranslationsPath)};
+    // windeployqt merges the module catalogues into qt_ru.qm; a Qt install has qtbase_ru.qm
+    bool trLoaded = false;
     for (const QString& dir : trDirs)
-        if (qtTr.load(QStringLiteral("qtbase_ru"), dir)) {
-            QApplication::installTranslator(&qtTr);
-            break;
-        }
+        for (const QString& name : {QStringLiteral("qt_ru"), QStringLiteral("qtbase_ru")})
+            if (!trLoaded && qtTr.load(name, dir))
+                trLoaded = QApplication::installTranslator(&qtTr);
 
     QCommandLineParser p;
     p.setApplicationDescription(QStringLiteral("LabelForge — label designer. Batch mode: pass a .lfl file and an output option."));

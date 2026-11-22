@@ -8,7 +8,9 @@
 #include <QPainter>
 #include <QPdfWriter>
 #include <QPrinter>
+#include <QPrinterInfo>
 #include <QRegularExpression>
+#include <algorithm>
 #include <cmath>
 
 namespace lf {
@@ -135,16 +137,41 @@ void PrintJob::renderPage(QPainter* p, int page, double deviceDpi, bool mono) co
     }
 }
 
-bool PrintJob::printTo(QPrinter* printer, QString* err) const
+bool PrintJob::pageFits(const QPrinterInfo& info, const SheetLayout& l)
+{
+    if (info.isNull())
+        return true;
+    // compare sizes regardless of orientation, with 1.5 mm tolerance
+    auto sorted = [](QSizeF s) { return QSizeF(std::min(s.width(), s.height()), std::max(s.width(), s.height())); };
+    const QSizeF want = sorted(QSizeF(l.pageW, l.pageH));
+    for (const QPageSize& ps : info.supportedPageSizes()) {
+        const QSizeF s = sorted(ps.size(QPageSize::Millimeter));
+        if (std::abs(s.width() - want.width()) < 1.5 && std::abs(s.height() - want.height()) < 1.5)
+            return true;
+    }
+    if (!info.supportsCustomPageSizes())
+        return false;
+    const QSizeF lo = sorted(info.minimumPhysicalPageSize().size(QPageSize::Millimeter));
+    const QSizeF hi = sorted(info.maximumPhysicalPageSize().size(QPageSize::Millimeter));
+    if (!lo.isEmpty() && (want.width() < lo.width() - 0.5 || want.height() < lo.height() - 0.5))
+        return false;
+    if (!hi.isEmpty() && (want.width() > hi.width() + 0.5 || want.height() > hi.height() + 0.5))
+        return false;
+    return true;
+}
+
+bool PrintJob::printTo(QPrinter* printer, QString* err, bool setPage) const
 {
     if (m_instances.isEmpty()) {
         *err = tr("Нет этикеток для печати");
         return false;
     }
     printer->setFullPage(true);
-    printer->setPageOrientation(QPageLayout::Portrait);
-    if (!printer->setPageSize(pageSizeFor(m_layout)))
-        printer->setPageSize(pageSizeFor(m_layout));
+    if (setPage) {
+        printer->setPageOrientation(QPageLayout::Portrait);
+        if (!printer->setPageSize(pageSizeFor(m_layout)))
+            printer->setPageSize(pageSizeFor(m_layout));
+    }
     printer->setPageMargins(QMarginsF(0, 0, 0, 0), QPageLayout::Millimeter);
     QPainter painter;
     if (!painter.begin(printer)) {

@@ -19,6 +19,7 @@
 #include "ui/PropertyPanel.h"
 #include <QPlainTextEdit>
 #include <QPointer>
+#include <QPrinterInfo>
 #include "ui/SheetLayoutDialog.h"
 
 #include <QApplication>
@@ -664,6 +665,42 @@ int main(int argc, char** argv)
         PrintDialog dlg(tdoc, data, out.absolutePath(), &w);
         dlg.show();
         shot(&dlg, out, QStringLiteral("10_print_roll"));
+
+        // the printer list sits in "Вывод" for every output that goes to a printer
+        auto* output = dlg.findChild<QComboBox*>(QStringLiteral("output"));
+        auto* printer = dlg.findChild<QComboBox*>(QStringLiteral("printer"));
+        CHECK(output && printer, "print dialog has an output and a printer list");
+        if (output && printer) {
+            CHECK(printer->count() == QPrinterInfo::availablePrinterNames().size(), "printer list shows every printer");
+            output->setCurrentIndex(output->findData(1));  // PDF
+            settle();
+            CHECK(!printer->isVisible(), "no printer list for PDF");
+            output->setCurrentIndex(output->findData(2));  // thermal, direct
+            settle();
+            CHECK(printer->isVisible(), "printer list shown for the thermal printer");
+            output->setCurrentIndex(output->findData(0));  // driver
+            settle();
+            CHECK(printer->isVisible(), "printer list shown for the driver output");
+            auto* setup = dlg.findChild<QToolButton*>(QStringLiteral("printerSetup"));
+            CHECK(setup && setup->isVisible(), "driver settings button shown");
+            // every layout remembers its own printer
+            if (printer->count() >= 2) {
+                auto* layout = dlg.findChild<QComboBox*>(QStringLiteral("layout"));
+                const int rollIdx = layout->findData(QStringLiteral("roll"));
+                const int a4Idx = layout->findData(QStringLiteral("a4-auto"));
+                if (rollIdx >= 0 && a4Idx >= 0) {
+                    layout->setCurrentIndex(rollIdx);
+                    printer->setCurrentIndex(0);
+                    layout->setCurrentIndex(a4Idx);
+                    printer->setCurrentIndex(1);
+                    layout->setCurrentIndex(rollIdx);
+                    CHECK(printer->currentIndex() == 0, "roll layout brings back its printer");
+                    layout->setCurrentIndex(a4Idx);
+                    CHECK(printer->currentIndex() == 1, "A4 layout brings back its printer");
+                }
+            }
+        }
+        CHECK(!dlg.settings().toJson().contains(QStringLiteral("printer")), "printer is not saved in the label file");
     }
     {
         LabelDocument a4;

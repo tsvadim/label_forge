@@ -10,6 +10,7 @@
 
 class QPainter;
 class QPrinter;
+class QPrinterInfo;
 
 namespace lf {
 
@@ -34,7 +35,9 @@ public:
     // mono = the page will be reduced to 1 bit (thermal), see RenderContext::monoDither
     void renderPage(QPainter* p, int page, double deviceDpi, bool mono = false) const;
 
-    bool printTo(QPrinter* printer, QString* err) const;
+    // setPage = give the printer the layout's page size; false keeps the paper
+    // chosen in the driver (labels go to the top-left corner of it)
+    bool printTo(QPrinter* printer, QString* err, bool setPage = true) const;
     bool exportPdf(const QString& path, QString* err) const;
     // one PNG per label: path pattern with %1 for the number, e.g. "label_%1.png"
     bool exportPng(const QString& pattern, double dpi, QString* err) const;
@@ -42,6 +45,10 @@ public:
     // The layout the settings choose for this document (a library layout or
     // the document's own multi-up setup).
     static SheetLayout layoutFor(const LabelDocument& doc, const PrintSettings& settings);
+
+    // Whether the printer can take the layout's page: a size it lists, or a
+    // custom size within its limits. A null printer counts as fitting.
+    static bool pageFits(const QPrinterInfo& printer, const SheetLayout& layout);
 
     // "1-3, 5" -> {0,1,2,4} (0-based), empty -> all
     static QVector<int> parseRange(const QString& range, int count);
